@@ -125,6 +125,51 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
 fi
 log_info "系统组件就绪（node $(node --version 2>/dev/null || echo '?'), ffmpeg $(ffmpeg -version 2>/dev/null | head -n1 | awk '{print $3}' || echo '?')）。"
 
+# ------------------------------------------------- 原生模块架构对齐（issue #65）
+# 上游 lxserver release zip 在 x64 机器上打包，node_modules 只有
+# music-tag-native-linux-x64-gnu；在 arm64/armhf 上 require 会抛
+#   Error: Cannot find module './music-tag-native.linux-arm64-gnu.node'
+# 导致 lxserver 启动即崩溃 -> 洛雪源上传/解析全部失败（"All connection attempts
+# failed"）。music-tag-native 的 optionalDependencies 已声明各平台包，这里按本机
+# 架构补齐；必须放在"已就位"判断之外，否则已装坏的机器永远不会被修复。
+MTN_VERSION="1.1.0"
+case "$(uname -m)" in
+    aarch64|arm64) MTN_PKG="music-tag-native-linux-arm64-gnu" ;;
+    armv7l|armv8l|armhf) MTN_PKG="music-tag-native-linux-arm-gnueabihf" ;;
+    *) MTN_PKG="" ;;
+esac
+
+ensure_music_tag_native() {
+    [ -z "${MTN_PKG}" ] && return 0
+    [ -d "${LXSERVER_DIR}/node_modules/music-tag-native" ] || return 0
+    if [ -d "${LXSERVER_DIR}/node_modules/${MTN_PKG}" ]; then
+        return 0
+    fi
+    log_info "补齐 lxserver 原生模块 ${MTN_PKG}@${MTN_VERSION}（$(uname -m)）..."
+    _reg="${FNMUSIC_NPM_REGISTRY:-https://registry.npmmirror.com}"
+    _tgz="$(mktemp "${TMPDIR:-/tmp}/mtn-XXXXXX.tgz")"
+    _ok=0
+    for _r in "${_reg}" "https://registry.npmmirror.com" "https://registry.npmjs.org"; do
+        [ -z "${_r}" ] && continue
+        if curl -fSL --connect-timeout 10 --max-time 180 \
+            "${_r}/${MTN_PKG}/-/${MTN_PKG}-${MTN_VERSION}.tgz" -o "${_tgz}" 2>/dev/null \
+            && [ -s "${_tgz}" ]; then
+            mkdir -p "${LXSERVER_DIR}/node_modules/${MTN_PKG}"
+            if tar -xzf "${_tgz}" -C "${LXSERVER_DIR}/node_modules/${MTN_PKG}" --strip-components=1 2>/dev/null; then
+                _ok=1
+                break
+            fi
+        fi
+    done
+    rm -f "${_tgz}"
+    if [ "${_ok}" -eq 1 ]; then
+        log_info "${MTN_PKG} 已就位。"
+    else
+        log_err "无法获取 ${MTN_PKG}：$(uname -m) 上洛雪源将不可用。"
+        log_err "可手动下载 ${MTN_PKG}-${MTN_VERSION}.tgz 解压到 ${LXSERVER_DIR}/node_modules/${MTN_PKG}/ 后重跑。"
+    fi
+}
+
 # ------------------------------------------------------- 3. lxserver 落位
 # 版本锁定文件与 Dockerfile 构建层同源（scripts/update_lxserver.sh 维护）
 if [ ! -f "${LXSERVER_VERSION_FILE}" ]; then
@@ -208,5 +253,7 @@ else
     printf '%s\n' "${LXSERVER_TAG}" > "${LXSERVER_STAMP}"
     log_info "lxserver ${LXSERVER_TAG} 已落位 ${LXSERVER_DIR}。"
 fi
+
+ensure_music_tag_native
 
 log_info "原生音源运行时就绪。"
