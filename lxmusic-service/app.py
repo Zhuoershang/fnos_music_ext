@@ -1048,12 +1048,18 @@ def _err(msg: str, code: int = 404) -> JSONResponse:
 async def healthz():
     user_src = await describe_user_source()
     caps = await source_capabilities()
+    # issue #65：lxserver 崩溃时此处仍返回兼容层信息，用户会误判成网络问题。
+    # 显式暴露 lxserver 存活状态，便于 WebUI / 运维一眼看出是上游进程挂了。
+    lxserver_alive = await LXSERVER.is_alive()
+    if not lxserver_alive:
+        logger.warning("healthz: lxserver 不可达（进程崩溃或端口未监听）")
     return {
         "ok": True,
         "service": "fnmusic-lxmusic",
         "version": SERVICE_VERSION,
         "sources": CONF["sources"],
         "user_source": user_src,
+        "lxserver": {"alive": lxserver_alive},
         "circuit": chain_health_snapshot(),
         "capabilities": caps,
         "charts": ["kg", "kw", "wy"],
