@@ -4,6 +4,16 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
 ## [未发布]
+
+## [2.9.1] - 2026-10-20
+
+修复 ARM64 / aarch64 飞牛设备上洛雪自定义源不可用（issue #65）。
+
+### 修复
+
+- **ARM64 上洛雪自定义源不可用（issue #65）**：lxserver 依赖的原生模块 `music-tag-native` 此前只随发布构件被打包了 x64 版本（构件在 x86 机器上构建，`optionalDependencies` 只解析出 `music-tag-native-linux-x64-gnu`），在 aarch64 设备上 `require` 时抛 `Cannot find module './music-tag-native.linux-arm64-gnu.node'`，进程启动即崩溃并被 supervisord 无限重启——表现为「从 NAS 选择」上传音源报 `All connection attempts failed`、洛雪音乐源列表恒为空、容器健康检查持续失败。现在容器构建期（`container/Dockerfile`）按目标架构（`dpkg --print-architecture`）补齐 `music-tag-native` 对应平台的预编译包，取包失败直接中断构建而非静默产出坏包；原生部署（`ensure_sources_native.sh`）同样按 `uname -m` 补齐，且补齐逻辑置于「已就位」判断之外，已受影响的机器重跑脚本即可自愈，无需重装。
+- **`/healthz` 如实上报 lxserver 存活状态（issue #65）**：此前 lxserver 崩溃重启期间 `/healthz` 仍返回 `ok:true`，用户容易误判为网络问题。现新增 `lxserver.alive` 字段，并在不可达时记录警告日志，便于快速区分「上游进程挂了」与「网络不通」。
+
 ## [2.9.0] - 2026-10-15
 
 自 2.8.3 以来的全部变更收拢为本次正式版发布（涵盖 2.9.0a、2.9.0b 迭代预发布与期间的多轮 issue 修复；2.9.0 开发段与两个预发布版本不再单独列段）。
