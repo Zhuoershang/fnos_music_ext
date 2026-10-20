@@ -91,6 +91,9 @@ RUN groupadd -g 1000 appuser \
 
 # lxserver 预编译包引入：构建上下文优先（预置离线 zip）+ 多镜像加速回退链
 ARG LXSERVER_MIRROR="https://ghfast.top"
+# 原生模块（music-tag-native 平台预编译包）拉取源：构件 zip 在 x64 机器上打包，
+# 只含 x64 的 .node；arm64 宿主必须在构建期补齐对应预编译包，否则 lxserver 启动即崩。
+ARG NPM_REGISTRY="https://registry.npmmirror.com"
 COPY container/lxserver.version /srv/lxserver.version
 COPY container/lxserver-artifact/ /srv/lxserver-artifact/
 COPY container/lxserver_compat.py /srv/lxserver_compat.py
@@ -138,6 +141,42 @@ RUN set -eu; \
     fi; \
     if [ -f /srv/lxserver/server/server/userApi.js ]; then \
         python3 /srv/lxserver_compat.py /srv/lxserver/server/server/userApi.js; \
+    fi; \
+    # --- 原生模块架构对齐（issue #65）-------------------------------------
+    # 上游 release zip 在 x64 机器打包，node_modules 里只有
+    # music-tag-native-linux-x64-gnu；在 arm64 宿主机上 require 会抛
+    #   Error: Cannot find module './music-tag-native.linux-arm64-gnu.node'
+    # 导致 lxserver 启动即崩溃、被 supervisord 无限重启，洛雪源上传/解析全废。
+    # music-tag-native 的 optionalDependencies 已声明全部平台包，这里按构建架构补齐。
+    MTN_VER=1.1.0; \
+    if [ -f /srv/lxserver/node_modules/music-tag-native/index.js ]; then \
+        case "$(dpkg --print-architecture)" in \
+            arm64) MTN_PKG=music-tag-native-linux-arm64-gnu ;; \
+            armhf) MTN_PKG=music-tag-native-linux-arm-gnueabihf ;; \
+            *)     MTN_PKG=music-tag-native-linux-x64-gnu ;; \
+        esac; \
+        if [ ! -d "/srv/lxserver/node_modules/${MTN_PKG}" ]; then \
+            echo "[INFO] 补齐 lxserver 原生模块 ${MTN_PKG}@${MTN_VER} ..."; \
+            MTN_OK=0; \
+            for reg in "${NPM_REGISTRY}" "https://registry.npmmirror.com" "https://registry.npmjs.org"; do \
+                [ -z "${reg}" ] && continue; \
+                MTN_TGZ="$(mktemp)"; \
+                if curl -fSL --connect-timeout 10 --max-time 180 \
+                     "${reg}/${MTN_PKG}/-/${MTN_PKG}-${MTN_VER}.tgz" -o "${MTN_TGZ}" && [ -s "${MTN_TGZ}" ]; then \
+                    mkdir -p "/srv/lxserver/node_modules/${MTN_PKG}"; \
+                    if tar -xzf "${MTN_TGZ}" -C "/srv/lxserver/node_modules/${MTN_PKG}" --strip-components=1; then \
+                        MTN_OK=1; rm -f "${MTN_TGZ}"; break; \
+                    fi; \
+                fi; \
+                rm -f "${MTN_TGZ}"; \
+            done; \
+            if [ "${MTN_OK}" -ne 1 ]; then \
+                echo "ERROR: 无法获取 ${MTN_PKG}；$(dpkg --print-architecture) 上 lxserver 将因缺少原生模块崩溃。" >&2; \
+                echo "ERROR: 可预先下载 ${MTN_PKG}-${MTN_VER}.tgz 放入 container/lxserver-artifact/ 后重试。" >&2; \
+                exit 1; \
+            fi; \
+            echo "[INFO] ${MTN_PKG} 已就位。"; \
+        fi; \
     fi; \
     rm -rf /srv/lxserver-tmp /srv/lxserver-artifact /srv/lxserver_compat.py; \
     chown -R appuser:appuser /srv/lxserver
