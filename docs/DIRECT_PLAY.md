@@ -35,6 +35,26 @@ URL、源站请求头和编码，不重新选档。musicdl 通过受认证的短
 网易和洛雪返回剩余策略缓存寿命，代理不会把完整 TTL 从当前时间重新计算。
 这些寿命是服务复用策略，并非源站保证的有效期。
 
+### 网易 HTTP 音频直链安全升级 HTTPS 兼容机制
+
+上游网易 musicbox 服务解析音频时常返回 `http://m[0-9]+.music.126.net` 等 HTTP 地址。直接交付客户端会导致混合内容（Mixed Content）受阻或不安全：
+
+1. **严格窄白名单 CDN 匹配**：仅允许匹配 `^m\d+\.music\.126\.net$` 的音频 CDN 域名（如 `m7`、`m8`、`m701`、`m801` 等）。严禁泛放行 `*.126.net` 或 `126.net`，防止凭据泄露或开放跳转。
+2. **标准 HTTP 原样升级**：仅对标准无自定义端口（或 80 端口）、无 userinfo 凭据的 HTTP 地址升级为 HTTPS，路径（path）与查询参数（query）原样保留。带认证凭据或非标准端口的 URL 不做升级。
+3. **DNS 安全前置校验**：升级为 HTTPS 候选后，探测前必须先经 `validate_media_url` 进行公共 DNS 解析校验，排查全部返回 IP；若包含私网、回环、链路本地或多播地址，立刻拒绝，防止内部 SSRF。
+4. **有界流式前缀探活（Bounded Streamed Prefix Probe）**：
+   - 探测客户端采用普通桌面 User-Agent，绝不携带 Cookie 或 Referer；
+   - 发送前缀 Range（如 `bytes=0-8191`）并声明 `Accept-Encoding: identity`；
+   - 响应状态码必须为 `200` 或 `206`，`Content-Encoding` 必须为 identity（防解压炸弹）；
+   - 仅流式读取头部少量前缀（几 KB 以内）并校验音频特征 magic（如 ID3、fLaC、OggS、ftyp、MPEG 同步字等），一旦命中即刻关闭连接，绝不下整文件；
+   - 全流程总超时硬上限 3 秒（超时即判定探活失败）。
+5. **重定向跳数与降级防御**：探测跟随最多 3 跳重定向，每跳均独立校验公共 HTTPS、窄白名单域名与公共 DNS 安全；严禁 HTTPS 降级为 HTTP，严禁向外域携带敏感头；最终返回校验通过的目标地址。
+6. **失败明确拒绝与既有规则兼容**：
+   - 既有 `https://` 地址直接放行支持，无需重复探活；
+   - 非白名单域名或非 HTTP 协议保持原 URL，由既有校验机制拦截拒绝；
+   - HTTP 升级探活失败（如 404、超时、非音频魔数、DNS 异常）时明确拒绝直接播放（返回 502），**绝不自动回退到 proxy 流兜底**；
+   - 升级成功后的 `DirectMediaTarget` 在客户端 302 重定向与后台边听边存（background save）使用同一 HTTPS URL，保持曲目 rendition 与缓存有效期绑定一致。
+
 短期绑定按凭证范围与歌曲隔离，容量有界。HEAD、GET 与非零 Range 复用同一
 目标；后台刚落地或改写标签的本地文件不会替换这次续传。绑定失效、源配置变化
 或关闭开关后，无法保证同表示的续传返回 409，需重新起播。
@@ -77,8 +97,37 @@ musicdl 内部接口使用安装时生成并持久化的 `FNMUSIC_INTERNAL_TOKEN
 
 ```sh
 python3 scripts/run_tests.py --jobs 2
-python3 -m pytest -q proxy/tests/test_direct_play.py proxy/tests/test_media_url.py proxy/tests/test_direct_play_https.py
+python3 -m pytest -q proxy/tests/test_direct_play.py proxy/tests/test_media_url.py proxy/tests/test_direct_play_https.py proxy/tests/test_netease_direct.py
 ```
+
+`test_netease_direct.py` 完全离线模拟客户端、MockTransport 与 DNS 解析器，禁止任何公网外联依赖：
+覆盖窄白名单正则、音频流特征 magic、URL 合规与既有 HTTPS 旁路、DNS 异步安全校验、
+206/200 流式前缀有界读取（内存严格截断）、206 非零起始偏移拒绝、禁止 text/json Content-Type、
+非 identity 编码拒绝、3 秒总超时截断、重定向逐跳校验与跨跳 Cookie 清除、
+以及 `_resolve_direct_target` 与 `_direct_redirect_response` 明确拒绝（无 proxy 兜底）集成验证。
+
+### 实机验证阶段记录与边界说明
+
+在真实网易预览环境下使用既存已登录账号进行实测（search 周杰伦前 5 档位 exhigh 及代表单曲），实测阶段表现如下：
+- `5257138`: `m801.music.126.net`，总长度 12764517
+- `509781655`: `m701.music.126.net`，总长度 9550125
+- `210049`: `m801.music.126.net`，总长度 11786493
+- `1888354230`: `m701.music.126.net`，总长度 5334248
+- `255020`: `m701.music.126.net`，总长度 7685268
+- `347230`: `m7.music.126.net`，总长度 5217895
+
+上述有效样本在原 HTTP 仅升级为 HTTPS、无 Cookie/Referer 的普通浏览器 UA 下，起始 Range `bytes=0-1023` 均返回 206 / audio/mpeg（前 5 首 ID3v4，`347230` 为 ID3v3）；非零 Range `bytes=65536-66559` 同样返回 206，读取各 1024 字节且 total 与初段一致。只在内存读取，不保存音频。
+测试中另有 4 首解析返回上游 code 404 且无 URL：`186016`、`186017`、`185809`、`275916`。没有拿到 URL，因此不能归因于 HTTPS 升级，也不能仅凭 404 确认版权或账号权益根因。
+
+同一实机的 musicdl 对照：3 个咪咕样本解析为 `https://freetyst.nf.migu.cn` 且无附加请求头，均通过上述起始/非零 1024 字节 Range（206 / ID3v3，总长度分别为 7312407、12620488、7257027）；3 个酷我样本只返回 `http://kw-er.kuwo.cn`，被 HTTPS-only 直连规则正确拒绝，未任意升级或探测 HTTP。搜索同时返回来源错误字段，不据此声称整个平台无故障。
+
+洛雪实机仅确认管理服务与 lxserver 运行；`LX_SOURCE_URL` 为空、已导入脚本均未激活，运行时源未配置。未擅自激活脚本，故没有真实洛雪取链/音频交付样本，不能推导“所有源已失效”。
+
+对照 [pdone/lx-music-source README](https://github.com/pdone/lx-music-source)（健康表标记 2026-10-28 01:11 北京时间）：xinghai 显示可用；sixyin 未列入健康表，但仍提供在线导入链接，因此缺项不等于失效。该表是上游自测，不替代本机脚本初始化及逐曲交付验证。本地上传源缺少 `sourceUrl` 会导致旧身份匹配失效、运行状态未知或保存时误判初始化；本版补齐快照和匹配，不能据此断言实机过去的未激活状态就是该缺陷触发。
+
+三个指定榜单详情均正常：`3001835560` 网易云ACG动画榜、`3001795926` 网易云ACG游戏榜、`2809577409` 网易云欧美新歌榜。验证使用已有预览机制短时启动 musicbox/musicdl，结束后均自动停止、预览列表为空，当前音源仍为 lxmusic；没有保存配置。
+
+**未经验收边界声明**：真实客户端终端（Chromium、Firefox、Safari、官方 iOS/Android）完整播放与 HEAD 官方用户鉴权矩阵尚未在多机型端到端实机验证；单元测试与单段探活通过不等于全平台终端最终交付可用，不可据此断言全机型兼容验收。
 
 `test_direct_play_https.py` 生成一秒钟可解码 PCM/WAV，并使用两个不同主机名
 的隔离 HTTPS 服务验证完整下载、HEAD、Range seek、跨主机跳转和过期 403。
@@ -103,4 +152,4 @@ TLS 证书由测试临时生成并作为受信任证书导入客户端，保留�
 | 官方 iOS | 未测 | 未测 | 未测 | 未测 |
 | 官方 Android | 未测 | 未测 | 未测 | 未测 |
 
-这里的开发验证不连接生产实例，不使用私人账户，不执行真实收藏或曲库写入。
+隔离单元/HTTPS 夹具测试不连接生产；上述额外实机诊断使用既存已登录账号，只解析来源并读取有界 CDN Range，不执行官方音频 GET、真实收藏或曲库写入，不输出账号 Cookie、内部 token 或完整签名 URL。真实官方鉴权 HEAD / 302 链路未以账号凭据验证。
