@@ -10,8 +10,9 @@
 1. 明确实际已发布的对比基线：正式版对比上一正式版；首个预发布对比上一正式版；后续预发布对比上一预发布或正式版。
 2. 逐条阅读 `git log --oneline <基线tag>..HEAD`，同时检查 `git diff --stat <基线tag>..HEAD`。不能只看本次任务提交。
 3. 对照 CHANGELOG 检查新增功能、错误修复、架构兼容、配置和默认行为、文档及维护变更；内部维护可以合并概括，用户可见变更不能省略。
-4. 写明对比基线，确认 VERSION 与 FPK manifest/文件名一致；`proxy/version.py` 自动派生 tag 和 CHANGELOG 标题：`2.11.0-0` → `v2.11.0a` / `[2.11.0a]`，`2.11.0-1` → `v2.11.0b`，正式版 `2.11.0` → `v2.11.0`。WebUI 共用转换代码，禁止手写显示版本。CI 通过不能证明发行说明完整。
-5. 发布后读取公开 Release 正文，与对应 CHANGELOG 段核对；检查预发布标记及 FPK、SHA256 附件。
+4. 安装版本统一使用数字 `x.y.z-N`，正式版也必须保留修订号，不得降为 `x.y.z`。根目录 `RELEASE_CHANNEL` 显式取 `stable` 或 `prerelease`，禁止根据 `-N` 判断发布类型。`proxy/version.py` 为唯一转换：`2.11.0-4` + `stable` → tag/UI `v2.11.0`、CHANGELOG `[2.11.0]`；同一安装版本 + `prerelease` → tag/UI `v2.11.0e`、CHANGELOG `[2.11.0e]`（N=0..25 对应 a..z）。缺少/错误通道时新发布必须失败；旧版只在显式兼容读取时允许推断。
+5. 写明对比基线，核对 VERSION、manifest、包内 VERSION、附件文件名和 moo 索引保留同一数字安装版本，且包内包含 RELEASE_CHANNEL。WebUI 共用转换代码并带 v 前缀，禁止手写显示版本。是否已发布同时检查通道和目标 tag，不能因相同安装版本曾作预发布就自动升号。CI 通过不能证明发行说明完整。
+6. 正式发行从干净 dev 开始，完成测试后打无字母 tag，将 dev 合入 main 并推送两分支与 tag；Release CI 校验正式 tag 的提交已合入 main，只由 CI 构建并创建 Release。核对公开正文、prerelease=false、FPK/SHA256、moo 数字安装版本及 Gitee 镜像；成功后才清理被替代的同基础版本旧预发布，删除前复核身份，不碰其他正式版。
 
 ## 仅修订已发布说明
 
