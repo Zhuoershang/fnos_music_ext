@@ -2552,3 +2552,37 @@ def test_public_search_ui_bindings():
     assert 0 < i < j < html.find('</section>', i)
     assert 'FNMUSIC_PUBLIC_SEARCH: $("#public-search-enabled").checked' in js
     assert 'public-search-row' in js  # 随公共歌单开关显隐
+
+
+def test_scan_timing_config_roundtrip(env_file):
+    """落盘延迟/冷却窗口：schema 默认值、保存回读、边界拒绝。"""
+    with authed_client() as client:
+        r = client.get("/api/config")
+        rj = r.json()
+        assert rj["values"]["FNMUSIC_SCAN_DELAY_S"] == "3"
+        assert rj["values"]["FNMUSIC_SCAN_COOLDOWN_S"] == "90"
+        r = client.put("/api/config", json={"values": {"FNMUSIC_SCAN_DELAY_S": 10, "FNMUSIC_SCAN_COOLDOWN_S": 30}})
+        assert r.status_code == 200
+        rj = client.get("/api/config").json()
+        assert rj["values"]["FNMUSIC_SCAN_DELAY_S"] == "10"
+        assert rj["values"]["FNMUSIC_SCAN_COOLDOWN_S"] == "30"
+        # 越界钳制到范围内（与既有 int 键同语义：700→600，-1→0）
+        r = client.put("/api/config", json={"values": {"FNMUSIC_SCAN_DELAY_S": 700}})
+        assert r.status_code == 200
+        rj = client.get("/api/config").json()
+        assert rj["values"]["FNMUSIC_SCAN_DELAY_S"] == "600"
+        r = client.put("/api/config", json={"values": {"FNMUSIC_SCAN_COOLDOWN_S": -1}})
+        assert r.status_code == 200
+        rj = client.get("/api/config").json()
+        assert rj["values"]["FNMUSIC_SCAN_COOLDOWN_S"] == "0"
+
+
+def test_scan_timing_ui_bindings():
+    """前端两个数字框存在且位于曲库重扫接口旁，读写接线齐全。"""
+    html = open("webui-service/static/index.html", encoding="utf-8").read()
+    js = open("webui-service/static/app.js", encoding="utf-8").read()
+    for el in ("scan-delay", "scan-cooldown", "scan-delay-label", "scan-cooldown-label"):
+        assert f'id="{el}"' in html, el
+    assert 'FNMUSIC_SCAN_DELAY_S: parseFloat($("#scan-delay").value)' in js
+    assert 'FNMUSIC_SCAN_COOLDOWN_S: parseFloat($("#scan-cooldown").value)' in js
+    assert "updateScanLabels" in js
