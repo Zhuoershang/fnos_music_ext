@@ -123,6 +123,19 @@ def _safe_liked_number(raw: str, default: float | int, *, integer: bool = False)
         if integer:
             return value if 0 <= value <= 100 else default
         return value if value >= 0.5 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_scan_number(raw: str, default: float, lo: float, hi: float):
+    """扫描时间窗配置的安全解析：非法/越界回落默认（0 允许，语义=不等待）。"""
+    try:
+        value = float(raw)
+        if not math.isfinite(value) or value < lo or value > hi:
+            return default
+        return value
+    except (TypeError, ValueError):
+        return default
     except (TypeError, ValueError, OverflowError):
         return default
 
@@ -204,8 +217,13 @@ CONF = {
     # 下载"标准"档目标码率：官方实测 MP3 320k（prepare quality=standard, FLAC 源 → 320067bps）
     "transcode_dl_bitrate": os.environ.get("FNMUSIC_TRANSCODE_DL_BITRATE", "320k"),
     # 落盘进曲库后通知官方重扫的接口路径（POST）；空=禁用。官方无公开文档，
-    # 真机在官方 App 手动点一次扫描、从代理请求日志捕获真实路径后填入启用
+    # 真机在官方 App 手动点一次扫描、从代理请求日志捕获真实路径后填入启用。
+    # 支持「路径|JSON体」形态（如 /music/api/v1/shared-library/scan|{"guid":"..."}）
     "library_scan_path": (os.environ.get("FNMUSIC_LIBRARY_SCAN_PATH", "") or "").strip(),
+    # 落盘后延迟触发扫库的合并窗口（秒）：连续落盘多首合并为一次扫描，0=立即发
+    "scan_delay_s": _safe_scan_number(os.environ.get("FNMUSIC_SCAN_DELAY_S", "3"), 3.0, 0.0, 600.0),
+    # 扫库冷却窗口（秒）：触发一次后 N 秒内不再触发（成功失败都算），0=仅合并窗口兜底
+    "scan_cooldown_s": _safe_scan_number(os.environ.get("FNMUSIC_SCAN_COOLDOWN_S", "90"), 90.0, 0.0, 3600.0),
     "merge_suggest": os.environ.get("FNMUSIC_MERGE_SUGGEST", "false").lower() in ("true", "1", "yes"),
     "online_sources": os.environ.get("FNMUSIC_ONLINE_SOURCES", "KuwoMusicClient,MiguMusicClient"),
     # lx 平台白名单（同 .env 的 LX_SOURCES；install.sh --sources lx-<平台> 写入）；
@@ -247,6 +265,9 @@ CONF = {
     "public_playlists_enabled": os.environ.get("FNMUSIC_PUBLIC_PLAYLISTS_ENABLED", "false").lower() in ("true", "1", "yes"),
     "public_playlists_selection": os.environ.get("FNMUSIC_PUBLIC_PLAYLISTS_SELECTION", ""),
     "public_playlists_by_user": os.environ.get("FNMUSIC_PUBLIC_PLAYLISTS_BY_USER", ""),
+    # 歌单搜索含未添加公开歌单（2.11.5）：默认关；开启后歌单搜索按关键词
+    # 向洛雪源在线搜公共歌单，未收藏的命中卡片带 🔍 前缀，点击可打开详情
+    "public_search_enabled": os.environ.get("FNMUSIC_PUBLIC_SEARCH", "false").lower() in ("true", "1", "yes"),
     # 网易账号歌单注入（2.6.0）：默认关；需网易盒子启用并扫码登录，
     # 音乐页在热门推荐与官方歌单之间展示账号自建歌单（只读，不回写网易）
     "netease_my_playlists": os.environ.get("FNMUSIC_NETEASE_MY_PLAYLISTS", "false").lower() in ("true", "1", "yes"),
@@ -598,11 +619,14 @@ _ENV_WATCH_KEYS: dict[str, tuple[str, str]] = {
     "FNMUSIC_AUTO_COVER": ("auto_cover", "bool"),
     "FNMUSIC_LYRIC_AUTO_DL": ("lyric_auto_dl", "bool"),
     "FNMUSIC_LIBRARY_SCAN_PATH": ("library_scan_path", "str"),
+    "FNMUSIC_SCAN_DELAY_S": ("scan_delay_s", "scan_number"),
+    "FNMUSIC_SCAN_COOLDOWN_S": ("scan_cooldown_s", "scan_number"),
     "FNMUSIC_RECOMMEND_HOT": ("recommend_hot", "bool"),
     "FNMUSIC_RECOMMEND_DAILY": ("recommend_daily", "bool"),
     "FNMUSIC_PUBLIC_PLAYLISTS_ENABLED": ("public_playlists_enabled", "bool"),
     "FNMUSIC_PUBLIC_PLAYLISTS_SELECTION": ("public_playlists_selection", "str"),
     "FNMUSIC_PUBLIC_PLAYLISTS_BY_USER": ("public_playlists_by_user", "str"),
+    "FNMUSIC_PUBLIC_SEARCH": ("public_search_enabled", "bool"),
     "FNMUSIC_NETEASE_MY_PLAYLISTS": ("netease_my_playlists", "bool"),
     "FNMUSIC_NETEASE_PLAYLIST_RESIDENT": ("netease_playlist_resident", "bool"),
     "FNMUSIC_COVER_DIR": ("cover_dir", "str"),
@@ -720,6 +744,14 @@ def _env_watch_parse(raw: str, kind: str):
     if kind == "bind_timeout":
         try:
             return max(10.0, min(3600.0, float(raw)))
+        except (TypeError, ValueError):
+            return None
+    if kind == "scan_number":
+        # 扫描时间窗（延迟/冷却）：0 允许（延迟 0=立即发、冷却 0=仅合并窗口），
+        # 上限与默认值各自语义内收敛
+        try:
+            value = float(raw)
+            return value if math.isfinite(value) and 0 <= value <= 3600.0 else None
         except (TypeError, ValueError):
             return None
     if kind == "ttl_seconds":
@@ -6096,31 +6128,55 @@ _scan_last_attempt = 0.0
 _scan_task: "asyncio.Task | None" = None
 
 
+def _scan_config() -> "tuple[str, str]":
+    """解析重扫配置「路径|JSON体」：竖线分隔，JSON 段可选（兼容旧纯路径格式）。
+
+    返回 (path, body)；body 为空串表示无请求体。
+    """
+    raw = str(CONF.get("library_scan_path") or "").strip()
+    if not raw:
+        return "", ""
+    if "|" in raw:
+        path, _, body = raw.partition("|")
+        return path.strip(), body.strip()
+    return raw, ""
+
+
 def _schedule_library_scan(headers: dict | None) -> None:
     """落盘进曲库后通知官方重扫（FNMUSIC_LIBRARY_SCAN_PATH 为空=禁用）。
 
-    官方扫描接口无公开资料：路径可配置、默认禁用；3 秒合并窗口（连续落盘多首
-    只发一次）+ 90 秒 TTL（成功与失败都节流，路径配错不会风暴）。凭证头取自
-    触发请求（copy_incoming_headers），只在任务内一次性使用，不落盘。
+    官方扫描接口无公开资料：配置「路径|JSON体」（如
+    /music/api/v1/shared-library/scan|{"guid":"..."}），JSON 段可选；
+    3 秒合并窗口（连续落盘多首只发一次）+ 90 秒 TTL（成功与失败都节流，
+    路径配错不会风暴）。凭证头取自触发请求（copy_incoming_headers，含
+    Authx 新鲜签名原样透传），只在任务内一次性使用，不落盘。
     """
     global _scan_task, _scan_last_attempt
     if not str(CONF.get("library_scan_path") or "").strip() or not headers:
         return
-    if time.monotonic() - _scan_last_attempt < _SCAN_TTL_S:
+    if time.monotonic() - _scan_last_attempt < float(CONF.get("scan_cooldown_s") or _SCAN_TTL_S):
         return
     if _scan_task is not None and not _scan_task.done():
         return
 
     async def _run() -> None:
         global _scan_last_attempt
-        await asyncio.sleep(_SCAN_MERGE_S)
-        scan_path = str(CONF.get("library_scan_path") or "").strip()
+        delay = max(float(CONF.get("scan_delay_s") or 0.0), 0.0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        scan_path, scan_body = _scan_config()
         if not scan_path:
             return
         _scan_last_attempt = time.monotonic()
         try:
             client = get_upstream_client(app)
-            req = client.build_request("POST", scan_path, headers=dict(headers))
+            req_headers = dict(headers)
+            if scan_body:
+                req_headers["content-type"] = "application/json"
+            req = client.build_request(
+                "POST", scan_path, headers=req_headers,
+                content=scan_body.encode("utf-8") if scan_body else None,
+            )
             resp = await client.send(req)
             if resp.status_code == 200:
                 logger.info("Library scan triggered via %s", scan_path)
@@ -9083,26 +9139,28 @@ async def _enrich_cover_via_netease(request: Request, guid: str, data: dict) -> 
     return target
 
 
-def _embedded_cover_bytes(guid: str) -> "tuple[bytes, str] | None":
-    """本地边听边存缓存文件的内嵌专辑图（mutagen 读 ID3/FLAC/MP4 封面）。"""
-    path = find_cache_file(guid)
-    if not path:
-        return None
+def _extract_embedded_cover(path: str) -> "tuple[bytes, str] | None":
+    """从音频文件提取内嵌专辑图（mutagen 读 ID3/FLAC/MP4 封面）。
+
+    FLAC 的 pictures 挂在 MutagenFile 对象上而非 tags 上（VCFLACDict 无
+    pictures 属性），两者都要查。
+    """
     try:
         from mutagen import File as MutagenFile
 
         mf = MutagenFile(path)
         tags = getattr(mf, "tags", None)
-        if tags is None:
-            return None
         pics: list = []
-        if hasattr(tags, "pictures"):  # FLAC/APE
-            pics = list(tags.pictures or [])
-        elif hasattr(tags, "getall"):  # ID3
-            pics = list(tags.getall("APIC") or [])
-        elif hasattr(tags, "get"):
-            covr = tags.get("covr")  # MP4
-            pics = list(covr) if covr else []
+        if hasattr(mf, "pictures"):  # FLAC：对象属性（不在 tags 上）
+            pics = list(mf.pictures or [])
+        if not pics and tags is not None:
+            if hasattr(tags, "pictures"):  # APE
+                pics = list(tags.pictures or [])
+            elif hasattr(tags, "getall"):  # ID3
+                pics = list(tags.getall("APIC") or [])
+            elif hasattr(tags, "get"):
+                covr = tags.get("covr")  # MP4
+                pics = list(covr) if covr else []
         for pic in pics:
             data = getattr(pic, "data", None)
             if not data:
@@ -9112,8 +9170,16 @@ def _embedded_cover_bytes(guid: str) -> "tuple[bytes, str] | None":
                 mime = "image/jpeg"
             return bytes(data), mime
     except Exception as e:
-        logger.debug("embedded cover extract failed for %s: %s", guid, e)
+        logger.debug("embedded cover extract failed for %s: %s", path, e)
     return None
+
+
+def _embedded_cover_bytes(guid: str) -> "tuple[bytes, str] | None":
+    """本地边听边存缓存文件的内嵌专辑图。"""
+    path = find_cache_file(guid)
+    if not path:
+        return None
+    return _extract_embedded_cover(path)
 
 
 def _placeholder_cover_response(guid: str) -> Response:
@@ -9162,6 +9228,81 @@ def _official_cover_root() -> str | None:
             _OFFICIAL_COVER_ROOT_CACHE = cand
             return cand
     return None
+
+
+def _local_audio_path_by_cover_guid(cover_guid: str) -> str | None:
+    """官方库按封面资源 guid（track.cover_guid）反查磁盘音频文件路径。
+
+    官方扫描器只认音频内嵌专辑图，cover_guid 存在但封面资源文件缺失时
+    （代理落盘新歌官方尚未收录封面、或无内嵌图），官方 App 列表查无图、
+    代理透传必 400。这里按 guid 反查到音频文件本体，供内嵌封面提取兜底。
+    库不可用/查不到返回 None（调用方走原链路）。
+    """
+    raw = str(cover_guid or "").strip().lower()
+    for prefix in ("track_", "album_", "artist_", "playlist_"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    if not re.fullmatch(r"[0-9a-f]{32}", raw):
+        return None
+    db = dailyrec.music_db_path()
+    if not db or not os.path.exists(db):
+        return None
+    sql = """
+        SELECT af.path FROM track t
+        JOIN audio_file af ON af.id = t.audio_file_id
+        WHERE (t.cover_guid = ? OR t.guid = ?)
+          AND t.is_audio_file_deleted = 0 AND t.is_admin_deleted = 0
+          AND af.is_physical_file_deleted = 0
+        LIMIT 1
+    """
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2) as con:
+            row = con.execute(sql, (raw, raw)).fetchone()
+    except Exception as e:
+        logger.debug("local cover lookup failed for %s: %s", raw, e)
+        return None
+    path = str(row[0]) if row else ""
+    if path and os.path.isfile(path) and os.access(path, os.R_OK):
+        return path
+    return None
+
+
+_LOCAL_COVER_CACHE: dict[str, "tuple[bytes, str] | None"] = {}
+
+
+def _local_cover_response(cover_id: str) -> Response | None:
+    """官方封面文件未命中时的本地兜底：按 cover_guid 反查音频文件提取内嵌封面。
+
+    结果持久缓存（含阴性），同一 coverId 只提取一次；提取失败返回 None，
+    调用方继续走原透传链路。
+    """
+    raw = str(cover_id or "").strip().lower()
+    for prefix in ("track_", "album_", "artist_", "playlist_"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    if not re.fullmatch(r"[0-9a-f]{32}", raw):
+        return None
+    if raw in _LOCAL_COVER_CACHE:
+        hit = _LOCAL_COVER_CACHE[raw]
+        if hit is None:
+            return None
+        return Response(content=hit[0], media_type=hit[1],
+                        headers={"Cache-Control": "public, max-age=86400"})
+    result = None
+    path = _local_audio_path_by_cover_guid(raw)
+    if path:
+        extracted = _extract_embedded_cover(path)
+        if extracted:
+            result = extracted
+    if len(_LOCAL_COVER_CACHE) > 4096:
+        _LOCAL_COVER_CACHE.clear()
+    _LOCAL_COVER_CACHE[raw] = result
+    if result is None:
+        return None
+    return Response(content=result[0], media_type=result[1],
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 def _official_cover_file_response(cover_id: str, size: str | None = None) -> Response | None:
@@ -9266,6 +9407,10 @@ async def _playlist_cover_response(request: Request, guid: str, tracks: list,
                     size = request.query_params.get("size")
                     response = _official_cover_file_response(value, size)
                     if response is None:
+                        # 官方封面资源未命中：本地内嵌封面兜底（上游对无效
+                        # coverId 必 400，请求它纯属浪费）
+                        response = _local_cover_response(value)
+                    if response is None:
                         params = {"coverId": value}
                         if size:
                             params["size"] = size
@@ -9344,6 +9489,12 @@ async def static_cover(request: Request, subpath: str = ""):
             request, guid, nmpl.cached_tracks(nm_pl_id) or [], nmpl.cover_url_for(nm_pl_id))
     if not is_online_guid(guid):
         local_resp = _official_cover_file_response(guid, size=request.query_params.get("size"))
+        if local_resp is not None:
+            return local_resp
+        # 官方封面文件未命中：cover_guid 指向的资源不存在（代理落盘新歌官方
+        # 尚未收录封面）。按 guid 反查官方库音频文件提取内嵌封面直接出图，
+        # 不再把注定失败的请求透传给官方（官方对无效资源 id 回 400）。
+        local_resp = _local_cover_response(guid)
         if local_resp is not None:
             return local_resp
         # 32hex 且不在伪装反查表、官方封面文件也未命中：伪装 id 反解失败取证
@@ -10782,8 +10933,16 @@ async def playlist_track_list(request: Request):
                 await pubpl.load_tracks(request.app.state, public_entry, build_online_track)
             )
         except Exception as e:
+            # 拉取失败降级空列表而非 code -1：客户端对 -1 渲染空白页（歌单卡片
+            # 也没有），空列表至少保住详情页与"暂无曲目"语义；失败按源冷却，
+            # 稍后重试仍有机会成功
             logger.warning("public playlist track list failed (%s): %s", guid, e)
-            return JSONResponse(content={"code": -1, "msg": "public playlist load failed", "data": None})
+            return JSONResponse(
+                content=disguise_client_json({
+                    "code": 0, "msg": "ok", "data": {"list": [], "total": 0,
+                                                     "sort": request.query_params.get("sort") or ""},
+                })
+            )
         register_online_meta(tracks)
         try:
             page = max(int(request.query_params.get("page") or 1), 1)
@@ -11433,6 +11592,226 @@ async def _online_album_search(request: Request, keyword: str, limit: int) -> li
             seen.add(name_key)
             out.append(obj)
     return out[:limit]
+
+
+_EXT_PLAYLIST_SEARCH_MAX = 5
+# 在线歌单搜索（未添加公开歌单）：每源取 1 页、整体预算、关键词结果短缓存
+_PUBLIC_SEARCH_PAGE_SIZE = 20
+_PUBLIC_SEARCH_BUDGET_S = 2.5
+_PUBLIC_SEARCH_CACHE_TTL_S = 600.0
+_public_search_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+async def _search_public_playlists_online(request: Request, keyword: str) -> list[dict]:
+    """向启用的洛雪源在线搜公共歌单（未添加进 selection 的也能发现）。
+
+    与 track 搜索同款预算控制：各源并发、整体超时放弃，失败不影响主响应。
+    结果按关键词短 TTL 缓存，翻页/回退不重复打源站。卡片名带 🔍 前缀
+    （与已添加歌单区分，提示可去管理页添加收藏）。
+    """
+    if not CONF.get("public_search_enabled") or not CONF.get("lx_enabled"):
+        return []
+    kw = str(keyword or "").strip()
+    if not kw:
+        return []
+    cached = _public_search_cache.get(kw.lower())
+    if cached and time.monotonic() - cached[0] < _PUBLIC_SEARCH_CACHE_TTL_S:
+        return cached[1]
+    selected = CONF.get("lx_sources") or []
+    if not selected:
+        return []
+
+    client = get_lx_client(request.app)
+
+    async def search_source(source: str) -> list[dict]:
+        try:
+            r = await client.get(
+                "/api/v1/public-playlists",
+                params={"source": source, "channel": "search", "keyword": kw,
+                        "page": 1, "limit": _PUBLIC_SEARCH_PAGE_SIZE},
+                timeout=_PUBLIC_SEARCH_BUDGET_S,
+            )
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            items = data.get("items") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                return []
+            return [
+                {"provider": "lx", "source": source, "kind": "playlist",
+                 "id": str(it.get("id") or ""), "name": str(it.get("name") or ""),
+                 "cover_url": str(it.get("cover_url") or ""),
+                 "track_count": int(it.get("track_count") or 0)}
+                for it in items
+                if isinstance(it, dict) and it.get("id") and it.get("name")
+            ]
+        except Exception:
+            return []
+
+    deadline = time.monotonic() + _PUBLIC_SEARCH_BUDGET_S
+    tasks = {asyncio.create_task(search_source(s)): s for s in selected}
+    results: list[dict] = []
+    for task in asyncio.as_completed(list(tasks)):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            for t in tasks:
+                t.cancel()
+            break
+        try:
+            results.extend(await asyncio.wait_for(task, timeout=remaining))
+        except (TimeoutError, Exception):
+            continue
+
+    cards: list[dict] = []
+    seen: set[str] = set()
+    now_ts = int(time.time())
+    for item in results:
+        guid = pubpl.playlist_guid(item)
+        if guid in seen:
+            continue
+        seen.add(guid)
+        # 搜索结果自带封面直链：登记后封面端点同源直出，未添加歌单不再占位图
+        cover_url = str(item.get("cover_url") or "").strip()
+        if cover_url and _KW_TEXT_COVER_HOST not in cover_url:
+            pubpl._cover_urls[guid] = cover_url
+        name = f"🔍 [{pubpl._source_label(item['source'])}] {item['name']}"
+        if not cover_url:
+            # 源搜索结果无封面（多为源不可用/风控）：名字提示，避免点了空白无解释
+            name += "（暂不可用）"
+        # coverId 必须走 fake_official_guid（带反解表注册副作用）：搜索页封面请求
+        # 带 track_<fake>，封面端点靠反解回原文 guid 才能进公开歌单封面分支；
+        # pubpl.fake_guid 值相同但无注册，搜索页封面会 400（详情页拉过摘要才有图）
+        cards.append({
+            "guid": guid,
+            "name": name,
+            "coverId": "track_" + fake_official_guid(guid),
+            "createdAt": now_ts,
+            "updatedAt": now_ts,
+            "trackCount": item.get("track_count") or 0,
+            "isDaily": True,
+        })
+    if len(_public_search_cache) > 64:
+        _public_search_cache.clear()
+    _public_search_cache[kw.lower()] = (time.monotonic(), cards)
+    return cards
+
+
+def _ext_playlist_search_hits(request: Request, keyword: str, user_guid: str = "") -> list[dict]:
+    """扩展歌单卡片按名字匹配搜索关键词（子串、大小写不敏感）。
+
+    只读本地缓存，绝不触发歌单构建/网络拉取：推荐歌单用 display name 构造
+    （构建仍只在 _peek_daily_bundle 发生）；网易/公开歌单读既有摘要缓存，
+    公开歌单冷缓存时以 cached_card 磁盘兜底、不等待在线刷新。
+    命中按 _playlist_public_fields 归一化（与歌单列表注入同一形态），
+    上限 _EXT_PLAYLIST_SEARCH_MAX 防大量公开歌单时刷屏。
+    user_guid 供 liked 卡片 guid 构造（带用户段，详情端点按它回自己的歌单）。
+    """
+    kw = str(keyword or "").strip().lower()
+    if not kw:
+        return []
+    hits: list[dict] = []
+    seen: set[str] = set()
+
+    def consider(card: dict) -> None:
+        name = str(card.get("name") or "")
+        guid = str(card.get("guid") or "")
+        if not name or not guid or guid in seen:
+            return
+        seen.add(guid)
+        if kw in name.lower():
+            hits.append(_playlist_public_fields(card, []))
+
+    # 推荐歌单（daily/liked/hot，按各自开关）：display name 与用户无关，
+    # 无需身份探测（构建仍只在 _peek/_load 发生，这里只取名字）
+    for kind in _recommend_kinds_enabled():
+        bundle = dailyrec.empty_daily_bundle(user_guid or "shared", kind)
+        consider(bundle.get("playlist") or {})
+
+    # 网易账号歌单：内存摘要 + 磁盘兜底（懒加载），无网络
+    for card in nmpl._iter_known_cards():
+        consider(card)
+
+    # 公开歌单：仅内存/磁盘缓存，不发起在线刷新（peek_cards 会拉网络，不用）
+    conf = CONF
+    for entry in pubpl.configured_selection(conf):
+        guid = pubpl.playlist_guid(entry)
+        card = pubpl.cached_card(guid)
+        if isinstance(card, dict):
+            consider(card)
+
+    return hits[:_EXT_PLAYLIST_SEARCH_MAX]
+
+
+@app.api_route("/music/api/v1/search/playlist", methods=["GET", "HEAD"])
+@app.api_route("/music/api/v1/search/playlist/{subpath:path}", methods=["GET", "HEAD"])
+async def search_playlist(request: Request, subpath: str = ""):
+    """歌单搜索：官方自建歌单照常返回，名字命中关键词的扩展歌单追加在尾部。
+
+    官方搜索只有官方库，扩展歌单（推荐/网易账号/公开）搜不到；拦截后按歌单
+    名子串匹配注入（不做歌内曲目反查）。guid/coverId 伪装走 disguise 出口，
+    详情/曲目/封面端点对这几类歌单的专用分支全部已存在，点击即达。
+    """
+    upstream_client = get_upstream_client(request.app)
+    envelope = await fetch_upstream_envelope(request, upstream_client)
+    if not isinstance(envelope, dict) or envelope.get("code") != 0:
+        # 官方错误（含未登录 401 信封）原样透传，不吞官方语义
+        return envelope if not isinstance(envelope, dict) else JSONResponse(content=envelope)
+
+    keyword = str(request.query_params.get("q") or request.query_params.get("keyword") or request.query_params.get("wd") or "").strip()
+    if not keyword:
+        return JSONResponse(content=disguise_client_json(envelope))
+
+    # 每请求探测一次身份：liked 卡片的 guid 带 user 段（sha256），用请求者
+    # 自己的 guid 才能点进去看到自己的歌单（shared 变体会落空详情）
+    is_authed, user_guid, _auth_resp = await _probe_upstream_auth(request, upstream_client)
+    hits = _ext_playlist_search_hits(request, keyword, user_guid if is_authed else "")
+    # 在线层（未添加公开歌单）：独立预算并发洛雪源，失败不影响已得结果
+    try:
+        online_cards = await _search_public_playlists_online(request, keyword)
+    except Exception as e:
+        logger.warning("online public playlist search failed: %s", e)
+        online_cards = []
+    seen_guids = {str(h.get("guid") or "") for h in hits}
+    hits = hits + [c for c in online_cards if str(c.get("guid") or "") not in seen_guids]
+    if hits:
+        data = envelope.get("data")
+        if not isinstance(data, dict):
+            data = {}
+            envelope["data"] = data
+        lst = data.get("list") if isinstance(data.get("list"), list) else None
+        if lst is None:
+            data["list"] = lst = []
+        official_names = {
+            str(x.get("name") or "").strip().lower()
+            for x in lst if isinstance(x, dict)
+        }
+        add = [h for h in hits if str(h.get("name") or "").strip().lower() not in official_names]
+        data["list"] = lst + add
+        if isinstance(data.get("total"), int):
+            data["total"] = data["total"] + len(add)
+        elif "total" not in data:
+            data["total"] = len(data["list"])
+    # 扩展歌单卡片豁免伪装：guid 保留 online: 原文下发（与歌单列表注入同构）。
+    # 走 disguise 会把 guid 换成确定性 md5，反解依赖内存表——未添加歌单没有任何
+    # 持久化锚点（摘要/曲目从未拉过），代理重启后反解失败，详情永久空白；
+    # 原文 guid 与已添加歌单行为完全一致，Web 端已验证可正常消费。
+    ext_guids = {str(h.get("guid") or "") for h in hits}
+    return JSONResponse(content=_disguise_except_guids(envelope, ext_guids))
+
+
+def _disguise_except_guids(obj, keep_guids: set[str]):
+    """disguise_client_json 的局部豁免版：guid/coverId 命中 keep_guids 的条目
+    整体原样保留（其余照常伪装）。搜索响应里官方条目继续走伪装。"""
+    if not keep_guids:
+        return disguise_client_json(obj)
+    if isinstance(obj, dict):
+        guid = str(obj.get("guid") or "")
+        if guid in keep_guids:
+            return obj
+        return {k: _disguise_except_guids(v, keep_guids) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_disguise_except_guids(x, keep_guids) for x in obj]
+    return disguise_client_json(obj)
 
 
 @app.api_route("/music/api/v1/search/album", methods=["GET", "HEAD"])

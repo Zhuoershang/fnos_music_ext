@@ -576,6 +576,8 @@ function applyConfigToForm() {
   $("#recommend-hot").checked = v.FNMUSIC_RECOMMEND_HOT === "true";
   $("#recommend-daily").checked = v.FNMUSIC_RECOMMEND_DAILY === "true";
   $("#public-playlists-enabled").checked = v.FNMUSIC_PUBLIC_PLAYLISTS_ENABLED === "true";
+  $("#public-search-enabled").checked = v.FNMUSIC_PUBLIC_SEARCH === "true";
+  $("#public-search-row").hidden = !$("#public-playlists-enabled").checked;
   publicSelectionDetailSeq++;
   publicUserChanges.clear();
   if (configSchema.FNMUSIC_PUBLIC_PLAYLISTS_BY_USER) {
@@ -607,6 +609,9 @@ function applyConfigToForm() {
   $("#bind-timeout").value = v.FNMUSIC_OFFICIAL_BIND_TIMEOUT_S || "120";
   $("#handoff-max").value = v.FNMUSIC_TEE_HANDOFF_MAX != null ? v.FNMUSIC_TEE_HANDOFF_MAX : "3";
   $("#scan-path").value = v.FNMUSIC_LIBRARY_SCAN_PATH || "";
+  $("#scan-delay").value = v.FNMUSIC_SCAN_DELAY_S ?? "3";
+  $("#scan-cooldown").value = v.FNMUSIC_SCAN_COOLDOWN_S ?? "90";
+  updateScanLabels();
   updateTeeCountLabel();
   updateBindTimeoutLabel();
   $("#llm-base").value = v.FNMUSIC_LLM_BASE_URL || "";
@@ -667,6 +672,7 @@ function collectConfig() {
     FNMUSIC_RECOMMEND_HOT: $("#recommend-hot").checked,
     FNMUSIC_RECOMMEND_DAILY: $("#recommend-daily").checked,
     FNMUSIC_PUBLIC_PLAYLISTS_ENABLED: $("#public-playlists-enabled").checked,
+    FNMUSIC_PUBLIC_SEARCH: $("#public-search-enabled").checked,
     FNMUSIC_TEE_SAVE_ENABLED: $("#tee-enabled").checked,
     FNMUSIC_AUTO_COVER: $("#auto-cover").checked,
     FNMUSIC_LYRIC_AUTO_DL: $("#lyric-auto-dl").checked,
@@ -679,6 +685,8 @@ function collectConfig() {
     FNMUSIC_OFFICIAL_BIND_TIMEOUT_S: parseInt($("#bind-timeout").value || "120", 10) || 120,
     FNMUSIC_TEE_HANDOFF_MAX: parseInt($("#handoff-max").value || "3", 10) || 0,
     FNMUSIC_LIBRARY_SCAN_PATH: $("#scan-path").value.trim(),
+    FNMUSIC_SCAN_DELAY_S: parseFloat($("#scan-delay").value) || 0,
+    FNMUSIC_SCAN_COOLDOWN_S: parseFloat($("#scan-cooldown").value) || 0,
     FNMUSIC_LLM_BASE_URL: $("#llm-base").value.trim(),
     FNMUSIC_LLM_API_KEY: $("#llm-key").value.trim(),
     FNMUSIC_LLM_MODEL: $("#llm-model").value.trim(),
@@ -2412,6 +2420,13 @@ function updateBindTimeoutLabel() {
   $("#bind-timeout-label").textContent = `（${n} 秒）`;
 }
 $("#bind-timeout").addEventListener("input", updateBindTimeoutLabel);
+
+function updateScanLabels() {
+  $("#scan-delay-label").textContent = `（${$("#scan-delay").value || 0} 秒）`;
+  $("#scan-cooldown-label").textContent = `（${$("#scan-cooldown").value || 0} 秒）`;
+}
+$("#scan-delay").addEventListener("input", updateScanLabels);
+$("#scan-cooldown").addEventListener("input", updateScanLabels);
 
 window.addEventListener("beforeunload", (ev) => {
   if (dirty) ev.preventDefault();
