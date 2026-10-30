@@ -480,6 +480,7 @@ async def test_library_scan_debounce_and_ttl(monkeypatch):
 
     client = httpx.AsyncClient(transport=ScanTransport(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     try:
         p._schedule_library_scan({"cookie": "sid=x"})
         p._schedule_library_scan({"cookie": "sid=y"})  # 合并窗口内：并入同一任务
@@ -1030,6 +1031,7 @@ async def test_library_scan_config_body_and_headers(monkeypatch):
 
     client = httpx.AsyncClient(transport=ScanTransport(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     try:
         headers = {"cookie": "music-token=tok123", "authx": "nonce=1&timestamp=2&sign=abc"}
         p._schedule_library_scan(headers)
@@ -1058,6 +1060,7 @@ async def test_library_scan_legacy_path_without_body(monkeypatch):
 
     client = httpx.AsyncClient(transport=ScanTransport(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     try:
         p._schedule_library_scan({"cookie": "sid=x"})
         await asyncio.wait_for(p._scan_task, timeout=5.0)
@@ -1095,6 +1098,7 @@ async def test_scan_delay_zero_fires_immediately(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     try:
         t0 = time.monotonic()
         p._schedule_library_scan({"cookie": "sid=x"})
@@ -1121,6 +1125,7 @@ async def test_scan_custom_delay_and_cooldown(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     try:
         p._schedule_library_scan({"cookie": "sid=x"})
         t0 = time.monotonic()
@@ -1296,6 +1301,7 @@ async def test_scan_by_user_independent(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     # 任务内真实 guid 解析：u1 cookie → u-1，其他 → u-2
     async def fake_probe(request, client_):
         guid = "u-1" if request.headers.get("cookie") == "sid=u1" else "u-2"
@@ -1338,6 +1344,7 @@ async def test_scan_shared_bucket_falls_back_global(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     try:
         p._schedule_library_scan({"cookie": "sid=x"})
         await asyncio.wait_for(p._scan_task, timeout=5.0)
@@ -1387,6 +1394,7 @@ async def test_admin_scan_headers_login_and_cache(monkeypatch):
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setitem(p.CONF, "scan_admin_username", "admin")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     monkeypatch.setitem(p.CONF, "scan_admin_username", "admin")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "a" * 64)
     monkeypatch.setitem(p.CONF, "scan_admin_device_id", "d" * 32)
@@ -1437,6 +1445,7 @@ async def test_schedule_scan_uses_admin_headers(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     monkeypatch.setitem(p.CONF, "scan_admin_username", "admin")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "c" * 64)
     monkeypatch.setitem(p.CONF, "scan_admin_device_id", "d" * 32)
@@ -1471,6 +1480,7 @@ async def test_maintenance_scan_admin_test(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     monkeypatch.setitem(p.CONF, "scan_admin_password", "x" * 64)
     p._admin_token_cache.clear()
     try:
@@ -1510,6 +1520,7 @@ async def test_maintenance_scan_manual(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     monkeypatch.setitem(p.CONF, "scan_admin_username", "boss")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "y" * 64)
     monkeypatch.setattr(p, "_admin_scan_headers", p._REAL_ADMIN_HEADERS_ORIGINAL)
@@ -1532,6 +1543,7 @@ async def test_maintenance_scan_manual(monkeypatch):
                 return httpx.Response(200, json={"code": -1, "msg": "library busy"})
         client2 = httpx.AsyncClient(transport=T2(), base_url="http://unix")
         monkeypatch.setattr(p, "get_upstream_client", lambda a: client2)
+        monkeypatch.setattr(p, "get_gateway_client", lambda a: client2)
         code, out = await p._maintenance_scan_manual(guid)
         assert out["ok"] is False and "library busy" in out["message"]
         await client2.aclose()
@@ -1565,6 +1577,7 @@ async def test_scan_manual_reports_code_hint(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     monkeypatch.setitem(p.CONF, "scan_admin_username", "u")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "z" * 64)
     monkeypatch.setattr(p, "_admin_scan_headers", p._REAL_ADMIN_HEADERS_ORIGINAL)
@@ -1596,6 +1609,7 @@ async def test_maintenance_scan_all(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setattr(p, "get_gateway_client", lambda a: client)
     monkeypatch.setitem(p.CONF, "scan_admin_username", "u")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "s" * 64)
     monkeypatch.setattr(p, "_admin_scan_headers", p._REAL_ADMIN_HEADERS_ORIGINAL)
@@ -1613,6 +1627,7 @@ async def test_maintenance_scan_all(monkeypatch):
                 return httpx.Response(401, json={"code": 99999, "msg": "INVALID TOKEN"})
         client2 = httpx.AsyncClient(transport=T2(), base_url="http://unix")
         monkeypatch.setattr(p, "get_upstream_client", lambda a: client2)
+        monkeypatch.setattr(p, "get_gateway_client", lambda a: client2)
         code, out = await p._maintenance_scan_all()
         assert out["ok"] is False and ("登录态无效" in out.get("message", "")
                                        or "管理员登录态不可用" in out.get("error", ""))

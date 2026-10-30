@@ -2974,6 +2974,23 @@ def get_upstream_client(fastapi_app: FastAPI) -> httpx.AsyncClient:
     return client
 
 
+def get_gateway_client(fastapi_app: FastAPI) -> httpx.AsyncClient:
+    """飞牛统一网关（本机回环 5666）客户端。
+
+    官方 Web 端密码登录只在网关链路生效（网关对 password-login 做账号桥接，
+    upstream socket 直连返回 120001）；管理员扫库登录态因此走网关。
+    """
+    client = getattr(fastapi_app.state, "gateway_client", None)
+    if client is None:
+        port = 5667 if os.environ.get("FNMUSIC_GATEWAY_TLS") in ("1", "true") else 5666
+        client = httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}", timeout=30.0,
+            transport=httpx.AsyncHTTPTransport(retries=1),
+        )
+        fastapi_app.state.gateway_client = client
+    return client
+
+
 def get_musicdl_client(fastapi_app: FastAPI) -> httpx.AsyncClient:
     client = getattr(fastapi_app.state, "musicdl_client", None)
     if client is None:
@@ -6383,7 +6400,7 @@ async def _maintenance_scan_admin_login() -> tuple[int, dict]:
     """管理员登录测试：验证账密密文能否换取扫库凭证（userToken）。"""
     if not _admin_configured():
         return 400, {"ok": False, "error": "尚未配置扫库管理员密码密文"}
-    client = get_upstream_client(app)
+    client = get_gateway_client(app)
     using_default = not bool(str(CONF.get("scan_admin_password") or "").strip())
     token, _ = await _admin_login(client, _admin_password())
     source = "内置默认凭据" if using_default else "管理页配置凭据"
@@ -6448,7 +6465,7 @@ async def _post_scan_official(client: httpx.AsyncClient, req_headers: dict,
 
 async def _maintenance_scan_manual(guid: str) -> tuple[int, dict]:
     """手动触发指定共享库扫描：用管理员登录态（回退触发逻辑同自动扫库）。"""
-    client = get_upstream_client(app)
+    client = get_gateway_client(app)
     req_headers = await _admin_scan_headers(client) if _admin_configured() else None
     if not req_headers:
         return 200, {"ok": False, "error": "管理员登录态不可用：请先配置/测试扫库管理员密码密文",
@@ -6460,7 +6477,7 @@ async def _maintenance_scan_manual(guid: str) -> tuple[int, dict]:
 
 async def _maintenance_scan_all() -> tuple[int, dict]:
     """手动一键扫描全部音乐库（scan-all，无参数）：IO 压力大，由前端确认后调用。"""
-    client = get_upstream_client(app)
+    client = get_gateway_client(app)
     req_headers = await _admin_scan_headers(client) if _admin_configured() else None
     if not req_headers:
         return 200, {"ok": False, "error": "管理员登录态不可用：请先配置/测试扫库管理员密码密文",
@@ -6529,7 +6546,7 @@ def _schedule_library_scan(headers: dict | None) -> None:
         # 重登）；未配置或登录失败回退触发者登录态（管理员本人触发不受影响）
         req_headers = dict(headers)
         if _admin_configured():
-            admin_headers = await _admin_scan_headers(client)
+            admin_headers = await _admin_scan_headers(get_gateway_client(app))
             if admin_headers:
                 req_headers = admin_headers
             else:
