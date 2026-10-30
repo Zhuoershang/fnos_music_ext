@@ -4698,9 +4698,20 @@ async def _maintenance_request(method: str, path: str, body: dict) -> tuple[int,
                 await asyncio.to_thread(migrate_public_playlist_users, users)
                 values = dict(parse_env_file(_env_watch_path(), strict=True)[0])
                 CONF["public_playlists_by_user"] = values.get("FNMUSIC_PUBLIC_PLAYLISTS_BY_USER", "")
+                lib_count = 0
+                if _admin_configured():
+                    admin_headers = await _admin_scan_headers(get_upstream_client(app))
+                    if admin_headers:
+                        req = get_upstream_client(app).build_request(
+                            "GET", "/music/api/v1/shared-library/list",
+                            headers=admin_headers)
+                        resp = await get_upstream_client(app).send(req)
+                        data = resp.json() if resp.status_code == 200 else {}
+                        lib_count = len((data.get("data") or {}).get("list") or [])
             except (ValueError, OSError) as exc:
                 return 503, {"ok": False, "error": str(exc)}
             return 200, {"ok": True, "users": users, "total": len(users),
+                         "library_count": lib_count,
                          "public_playlists_by_user": pubpl.parse_user_selections(
                              CONF.get("public_playlists_by_user"))}
         if path == "/api/maintenance/organize":
@@ -4758,6 +4769,8 @@ async def _maintenance_request(method: str, path: str, body: dict) -> tuple[int,
         if not re.fullmatch(r"[0-9a-fA-F]{32}", guid):
             return 400, {"ok": False, "error": "共享库 guid 无效"}
         return await _maintenance_scan_manual(guid.lower())
+    if path == "/api/maintenance/scan-all":
+        return await _maintenance_scan_all()
     if path != "/api/maintenance/organize":
         return 400, {"ok": False, "error": "不支持的维护请求"}
     if (not isinstance(body, dict) or set(body) != {"confirm_beta", "root", "layout"} or
@@ -6357,6 +6370,46 @@ async def _maintenance_scan_admin_login() -> tuple[int, dict]:
                  "tested_at": time.time()}
 
 
+_SCAN_CODE_HINTS = {
+    120001: "账密密文无效或用户名错误",
+    100001: "参数错误：扫库配置缺少 guid",
+    100005: "资源不存在：guid 有误或音乐库已被删除",
+}
+
+
+def _scan_result_message(code: int, msg: str) -> str:
+    """官方扫库错误码细分提示（实测：120001=账密错、100001=缺参、100005=guid 无效）。"""
+    if code == 0:
+        return "扫描已触发"
+    hint = _SCAN_CODE_HINTS.get(code)
+    detail = f"{hint}（code={code}）" if hint else f"官方返回 code={code} {msg}"[:150]
+    return f"触发失败：{detail}"
+
+
+async def _post_scan_official(client: httpx.AsyncClient, req_headers: dict,
+                              body: dict, path: str) -> "tuple[bool, str]":
+    """POST 官方扫库端点并细分错误码；返回 (ok, message)。"""
+    started = time.time()
+    payload = json.dumps(body, separators=(",", ":"))
+    try:
+        req = client.build_request(
+            "POST", path, content=payload.encode("utf-8"),
+            headers={**req_headers, "content-type": "application/json"},
+        )
+        resp = await client.send(req)
+        data = resp.json() if resp.status_code == 200 else {}
+        code = data.get("code") if isinstance(data, dict) else None
+        if resp.status_code == 200 and code == 0:
+            return True, "扫描已触发"
+        if resp.status_code == 401 or code == 99999:
+            return False, "触发失败：登录态无效（401 INVALID TOKEN）"
+        msg = str((data.get("msg") or "") if isinstance(data, dict) else "")
+        return False, _scan_result_message(code, msg) if code is not None \
+            else f"触发失败：HTTP {resp.status_code}"
+    except Exception as exc:
+        return False, f"触发失败：{type(exc).__name__}"
+
+
 async def _maintenance_scan_manual(guid: str) -> tuple[int, dict]:
     """手动触发指定共享库扫描：用管理员登录态（回退触发逻辑同自动扫库）。"""
     client = get_upstream_client(app)
@@ -6364,23 +6417,21 @@ async def _maintenance_scan_manual(guid: str) -> tuple[int, dict]:
     if not req_headers:
         return 200, {"ok": False, "error": "管理员登录态不可用：请先配置/测试扫库管理员密码密文",
                      "tested_at": time.time()}
-    body = json.dumps({"guid": guid}, separators=(",", ":"))
-    path = "/music/api/v1/shared-library/scan"
-    started = time.time()
-    try:
-        req = client.build_request(
-            "POST", path, content=body.encode("utf-8"),
-            headers={**req_headers, "content-type": "application/json"},
-        )
-        resp = await client.send(req)
-        data = resp.json() if resp.status_code == 200 else {}
-        ok = resp.status_code == 200 and isinstance(data, dict) and data.get("code") == 0
-        msg = ("扫描已触发" if ok else
-               f"触发失败：HTTP {resp.status_code} {(data.get('msg') or '')[:120]}".strip())
-        return 200, {"ok": ok, "message": msg, "tested_at": started}
-    except Exception as exc:
-        return 200, {"ok": False, "error": f"触发失败：{type(exc).__name__}",
-                     "tested_at": started}
+    ok, message = await _post_scan_official(
+        client, req_headers, {"guid": guid}, "/music/api/v1/shared-library/scan")
+    return 200, {"ok": ok, "message": message, "tested_at": time.time()}
+
+
+async def _maintenance_scan_all() -> tuple[int, dict]:
+    """手动一键扫描全部音乐库（scan-all，无参数）：IO 压力大，由前端确认后调用。"""
+    client = get_upstream_client(app)
+    req_headers = await _admin_scan_headers(client) if _admin_configured() else None
+    if not req_headers:
+        return 200, {"ok": False, "error": "管理员登录态不可用：请先配置/测试扫库管理员密码密文",
+                     "tested_at": time.time()}
+    ok, message = await _post_scan_official(
+        client, req_headers, {}, "/music/api/v1/shared-library/scan-all")
+    return 200, {"ok": ok, "message": message, "tested_at": time.time()}
 
 
 def _scan_bucket(headers: dict | None) -> str:

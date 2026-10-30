@@ -321,6 +321,7 @@
           </label>
           <div class="btn-row">
             <button class="btn" id="scan-admin-test" type="button">登录测试</button>
+            <button class="btn" id="scan-all-run" type="button" title="扫描全部音乐库（文件多或网盘库多时耗时较长，请谨慎使用）">全库扫描</button>
             <p class="hint grow" id="scan-admin-test-result" role="status" aria-live="polite"></p>
           </div>
           <p class="hint">扫库接口需要管理员权限：填写管理员密码密文后，所有扫库（含非管理员用户触发的落盘）统一用管理员登录态执行，token 失效自动重新登录；获取密文：浏览器登录飞牛音乐时按 F12 → Network → 找到 password-login 请求 → 载荷里的 password 字段值。留空时回退用触发者本人的登录态。</p>

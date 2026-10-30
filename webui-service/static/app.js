@@ -977,6 +977,8 @@ async function loadMusicUsers() {
     if (data.ok === false || !Array.isArray(data.users)) throw new Error(data.error || "用户列表响应无效");
     publicUsers = data.users;
     publicUsersReady = true;
+    window.__scanLibCount = typeof data.library_count === "number" && data.library_count > 0
+      ? data.library_count : undefined;
     if (!publicUserChanges.size && data.public_playlists_by_user) {
       publicSelectionMap = data.public_playlists_by_user;
     }
@@ -1135,6 +1137,30 @@ async function testScanAdminLogin() {
   }
 }
 
+async function runScanAll() {
+  const btn = $("#scan-all-run");
+  const out = $("#scan-admin-test-result");
+  const count = window.__scanLibCount;
+  const libNote = typeof count === "number" ? `当前 ${count} 个` : "所有";
+  if (!window.confirm(`全库扫描将遍历${libNote}音乐库，文件多或网盘库多时耗时较长且占用 IO。确定继续吗？`)) return;
+  btn.disabled = true;
+  out.textContent = "正在触发全库扫描…";
+  try {
+    if (dirty) await saveConfig();
+    const res = await api("/api/maintenance/scan-all", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const when = new Date(res.tested_at ? res.tested_at * 1000 : Date.now()).toLocaleTimeString();
+    out.textContent = ((res.ok ? "✓ " : "✕ ") + (res.message || res.error || "未知结果") + `（${when}）`);
+  } catch (exc) {
+    out.textContent = "✕ 请求失败：" + exc.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("#scan-all-run").addEventListener("click", runScanAll);
 $("#scan-admin-test").addEventListener("click", testScanAdminLogin);
 
 $("#scan-by-user-retry").addEventListener("click", async () => {

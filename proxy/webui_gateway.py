@@ -350,8 +350,9 @@ def handle_maintenance(client: socket.socket, head_raw: bytes, method: str, targ
         # 扫库管理员登录测试 / 手动扫库（POST + JSON 体）
         scan_test_route = method == "POST" and target == MAINTENANCE_ROOT + "/scan-admin-test"
         scan_manual_route = method == "POST" and target == MAINTENANCE_ROOT + "/scan-manual"
+        scan_all_route = method == "POST" and target == MAINTENANCE_ROOT + "/scan-all"
         if not (cleanup_route or organize_route or users_route
-                or scan_test_route or scan_manual_route):
+                or scan_test_route or scan_manual_route or scan_all_route):
             client.sendall(_json_response(404, {"ok": False, "error": "未知维护接口"}))
             return
         if "transfer-encoding" in headers:
@@ -377,12 +378,15 @@ def handle_maintenance(client: socket.socket, head_raw: bytes, method: str, targ
                     raise ValueError("仅允许 confirm_beta: true 确认字段")
                 body = b'{"confirm_beta":true}'
             elif target in (MAINTENANCE_ROOT + "/scan-admin-test",
-                            MAINTENANCE_ROOT + "/scan-manual"):
-                # 登录测试无体 / 手动扫库仅 guid 字段，原样转发给 proxy 校验
+                            MAINTENANCE_ROOT + "/scan-manual",
+                            MAINTENANCE_ROOT + "/scan-all"):
+                # 登录测试/全库扫描空体 / 手动扫库仅 guid 字段，转发给 proxy 校验
                 if scan_manual_route and (not isinstance(req, dict)
                                           or set(req) != {"guid"}
                                           or not isinstance(req.get("guid"), str)):
                     raise ValueError("手动扫库仅允许 guid 字段")
+                if scan_all_route and req != {}:
+                    raise ValueError("全库扫描不允许携带参数")
                 body = json.dumps(req, separators=(",", ":")).encode("utf-8")
             else:
                 if (not isinstance(req, dict) or

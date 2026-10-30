@@ -1527,3 +1527,81 @@ async def test_maintenance_scan_manual(monkeypatch):
     finally:
         await client.aclose()
         p._admin_token_cache.clear()
+
+
+# ------------------------------ 扫库错误细分 + 全库扫描（2.11.11-7） ----
+
+def test_scan_result_message_codes():
+    """官方错误码细分：120001/100001/100005 → 明确中文提示。"""
+    assert p._scan_result_message(0, "") == "扫描已触发"
+    assert "账密密文无效" in p._scan_result_message(120001, "unauthorized")
+    assert "缺少 guid" in p._scan_result_message(100001, "unknown error")
+    assert "guid 有误或音乐库已被删除" in p._scan_result_message(100005, "resource not found")
+    assert "code=99999" in p._scan_result_message(99999, "x")
+
+
+@pytest.mark.anyio
+async def test_scan_manual_reports_code_hint(monkeypatch):
+    """手动扫库：官方返回 100005 时提示 guid 有误。"""
+    class T(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path.endswith("password-login"):
+                return httpx.Response(200, json={"code": 0, "data": {
+                    "userToken": "t", "user": {"name": "b", "guid": "g"}}})
+            if request.url.path.endswith("user/me"):
+                return httpx.Response(200, json={"code": 0, "data": {"guid": "g"}})
+            return httpx.Response(200, json={"code": 100005, "msg": "resource not found"})
+
+    client = httpx.AsyncClient(transport=T(), base_url="http://unix")
+    monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_password", "z" * 64)
+    p._admin_token_cache.clear()
+    try:
+        code, out = await p._maintenance_scan_manual("a" * 32)
+        assert out["ok"] is False and "guid 有误" in out["message"]
+    finally:
+        await client.aclose()
+        p._admin_token_cache.clear()
+
+
+@pytest.mark.anyio
+async def test_maintenance_scan_all(monkeypatch):
+    """全库扫描：POST scan-all 空 body，成功回显；401 提示登录态无效。"""
+    posts = []
+
+    class T(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path.endswith("password-login"):
+                return httpx.Response(200, json={"code": 0, "data": {
+                    "userToken": "ta", "user": {"name": "b", "guid": "g"}}})
+            if request.url.path.endswith("user/me"):
+                return httpx.Response(200, json={"code": 0, "data": {"guid": "g"}})
+            if request.url.path.endswith("scan-all"):
+                posts.append(request.content.decode())
+                return httpx.Response(200, json={"code": 0, "data": None})
+            return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=T(), base_url="http://unix")
+    monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_password", "s" * 64)
+    p._admin_token_cache.clear()
+    try:
+        code, out = await p._maintenance_scan_all()
+        assert out["ok"] is True and out["message"] == "扫描已触发"
+        assert posts == ["{}"]
+        # 401 场景：管理员登录态不可用（me 探测失败）
+        class T2(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                if request.url.path.endswith("password-login"):
+                    return httpx.Response(200, json={"code": 0, "data": {
+                        "userToken": "tb", "user": {"name": "b", "guid": "g"}}})
+                return httpx.Response(401, json={"code": 99999, "msg": "INVALID TOKEN"})
+        client2 = httpx.AsyncClient(transport=T2(), base_url="http://unix")
+        monkeypatch.setattr(p, "get_upstream_client", lambda a: client2)
+        code, out = await p._maintenance_scan_all()
+        assert out["ok"] is False and ("登录态无效" in out.get("message", "")
+                                       or "管理员登录态不可用" in out.get("error", ""))
+        await client2.aclose()
+    finally:
+        await client.aclose()
+        p._admin_token_cache.clear()

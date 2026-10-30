@@ -46,6 +46,7 @@ def _route(method: str, path: str) -> bool:
             or (method == "POST" and path == ORGANIZE_PATH)
             or (method == "POST" and path == "/api/maintenance/scan-admin-test")
             or (method == "POST" and path == "/api/maintenance/scan-manual")
+            or (method == "POST" and path == "/api/maintenance/scan-all")
             or (method == "GET" and (path == ORGANIZE_PATH or
                 re.fullmatch(ORGANIZE_PATH + r"/[0-9a-fA-F]{32}", path) is not None)))
 
@@ -61,6 +62,10 @@ def _validate_body(method: str, path: str, body):
                 or not re.fullmatch(r"[0-9a-fA-F]{32}", body["guid"])):
             raise ValueError("手动扫库仅允许 32 位 guid 字段")
         return {"guid": body["guid"]}
+    if path == "/api/maintenance/scan-all":
+        if body != {}:
+            raise ValueError("全库扫描不允许携带参数")
+        return {}
     if path == CLEANUP_PATH:
         if body != {"confirm_beta": True} or type(body.get("confirm_beta")) is not bool:
             raise ValueError("Explicit confirmation required")
