@@ -305,7 +305,7 @@
           </label>
           <div id="scan-by-user-panel" class="stack" hidden>
             <div class="btn-row">
-              <p class="hint grow">按用户配置扫库接口（含各自共享库 guid）：「接口路径|JSON参数」。未配置的用户使用上方全局接口；两边都空则该用户不触发扫库。扫库始终使用落盘用户自己的登录态。</p>
+              <p class="hint grow">按用户配置扫库接口（含各自共享库 guid），未配置的用户使用上方全局接口。</p>
               <button class="btn" id="scan-by-user-retry" type="button">刷新用户</button>
             </div>
             <div id="scan-by-user-list" class="stack"></div>
@@ -324,8 +324,6 @@
             <button class="btn" id="scan-all-run" type="button" title="扫描全部音乐库（文件多或网盘库多时耗时较长，请谨慎使用）">全库扫描</button>
             <p class="hint grow" id="scan-admin-test-result" role="status" aria-live="polite"></p>
           </div>
-          <p class="hint">扫库接口需要管理员权限：填写管理员密码密文后，所有扫库（含非管理员用户触发的落盘）统一用管理员登录态执行，token 失效自动重新登录；获取密文：浏览器登录飞牛音乐时按 F12 → Network → 找到 password-login 请求 → 载荷里的 password 字段值。留空时回退用触发者本人的登录态。</p>
-          <p class="hint">重扫接口填「接口路径|JSON参数」，如 /music/api/v1/shared-library/scan|{"guid":"你的共享库id"}（guid 可在飞牛音乐网页端手动扫库时按 F12 从请求参数获取）。歌曲落盘后延迟指定秒数（合并连续落盘，0=立即发）自动携带登录态调用（Authx 签名透传，无需额外配置），加速官方入库；冷却窗口内不重复触发；JSON 参数段可省略。留空=官方自动扫描入库。</p>
         </div>
         <div class="card">
           <div class="card-title">清理垃圾文件 <span class="badge">Beta</span></div>
@@ -577,6 +575,11 @@
   <template data-help-id="tee-binding">
     <p>显式收藏或加入歌单后，后台下载并绑定本地歌曲；浏览列表不会触发音频下载，已有文件会重试绑定。默认关闭。</p>
     <p>绑定等待是下载落库后等待官方收录并完成写入的上限，超时保留映射并自动重试。切歌续传让未完成下载转后台；并行数 0 表示关闭续传。重扫接口可用日志取证后填写以加速入库。</p>
+  </template>
+  <template data-help-id="library-scan">
+    <p>重扫接口填「接口路径|JSON参数」，如 /music/api/v1/shared-library/scan|{"guid":"你的共享库id"}（guid 可在飞牛音乐网页端手动扫库时按 F12 从请求参数获取）。歌曲落盘后延迟指定秒数（合并连续落盘，0=立即发）自动携带登录态调用，加速官方入库；冷却窗口内不重复触发；JSON 参数段可省略。留空=官方自动扫描入库。</p>
+    <p>扫库接口需要管理员权限：填写管理员密码密文后，所有扫库（含非管理员用户触发的落盘）统一用管理员登录态执行，token 失效自动重新登录；留空时回退用触发者本人的登录态。获取密文：浏览器登录飞牛音乐时按 F12 → Network → 找到 password-login 请求 → 载荷里的 password 字段值（64 位密文，即密码的 SHA-256）。填好可点「登录测试」验证，成功会显示识别到的账号与角色。</p>
+    <p>按用户配置扫库接口：每用户一行「接口路径|JSON参数」，可配置各自共享库的 guid；未配置的用户使用全局接口，两边都空则该用户不触发扫库。每行右侧「手动扫库」用当前填写的参数立即触发一次扫描并显示结果；「全库扫描」遍历全部音乐库（文件多或网盘库多时耗时较长），请按需使用。</p>
   </template>
   <template data-help-id="cache-dir">
     <p>存放在线试听滚动缓存、转码缓存和去重标记等临时文件，留空使用安装目录 cache。更换目录后旧缓存不迁移，去重标记会带到新目录。</p>
