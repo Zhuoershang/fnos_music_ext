@@ -16,6 +16,7 @@ import math
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -230,6 +231,11 @@ CONF = {
     # 每用户扫库接口：JSON {"<user_guid>": "路径|JSON体"}；键不存在回落全局
     # library_scan_path，键存在且值为空串=该用户显式禁用扫库
     "library_scan_by_user": (os.environ.get("FNMUSIC_LIBRARY_SCAN_BY_USER", "") or "").strip(),
+    # 管理员账密（密码为官方前端 password-login 的密文形态）：扫库统一用管理员
+    # 登录态（非管理员用户无扫库权限）；用户名可空=从登录响应取；均空=回退触发者
+    "scan_admin_username": (os.environ.get("FNMUSIC_SCAN_ADMIN_USERNAME", "") or "").strip(),
+    "scan_admin_password": (os.environ.get("FNMUSIC_SCAN_ADMIN_PASSWORD", "") or "").strip(),
+    "scan_admin_device_id": (os.environ.get("FNMUSIC_SCAN_ADMIN_DEVICE_ID", "") or "").strip(),
     "merge_suggest": os.environ.get("FNMUSIC_MERGE_SUGGEST", "false").lower() in ("true", "1", "yes"),
     "online_sources": os.environ.get("FNMUSIC_ONLINE_SOURCES", "KuwoMusicClient,MiguMusicClient"),
     # lx 平台白名单（同 .env 的 LX_SOURCES；install.sh --sources lx-<平台> 写入）；
@@ -629,6 +635,9 @@ _ENV_WATCH_KEYS: dict[str, tuple[str, str]] = {
     "FNMUSIC_SCAN_COOLDOWN_S": ("scan_cooldown_s", "scan_number"),
     "FNMUSIC_TEE_SAVE_BY_USER": ("tee_save_by_user", "bool"),
     "FNMUSIC_LIBRARY_SCAN_BY_USER": ("library_scan_by_user", "str"),
+    "FNMUSIC_SCAN_ADMIN_USERNAME": ("scan_admin_username", "str"),
+    "FNMUSIC_SCAN_ADMIN_PASSWORD": ("scan_admin_password", "str"),
+    "FNMUSIC_SCAN_ADMIN_DEVICE_ID": ("scan_admin_device_id", "str"),
     "FNMUSIC_RECOMMEND_HOT": ("recommend_hot", "bool"),
     "FNMUSIC_RECOMMEND_DAILY": ("recommend_daily", "bool"),
     "FNMUSIC_PUBLIC_PLAYLISTS_ENABLED": ("public_playlists_enabled", "bool"),
@@ -6222,6 +6231,98 @@ def _scan_config(user_guid: str = "") -> "tuple[str, str]":
     return _parse_scan_raw(CONF.get("library_scan_path"))
 
 
+# ------------------------------------------ 管理员登录态（扫库专用） ----
+# 官方扫库接口需要管理员权限；非管理员用户触发落盘时改用管理员登录态调用。
+# authx 签名算法（从官方前端还原并实测验证）：
+#   sign = md5("NDzZTVxnRKP8Z0jXg1VAMonaG8akvh_<path>_<nonce>_<ts>_<md5(body)>_<apiKey>")
+_AUTHX_SALT = "NDzZTVxnRKP8Z0jXg1VAMonaG8akvh"
+_AUTHX_API_KEY = "6D5602D4-A342-4799-A0F0-BB795E7167D0"
+
+_admin_token_cache: "dict[str, str]" = {}   # password_hash -> userToken（内存，不落盘）
+
+
+def _authx_header(path: str, body: str = "") -> str:
+    """生成官方 authx 签名头（登录与扫库请求都需要）。"""
+    nonce = str(random.randint(100000, 999999))
+    ts = str(int(time.time() * 1000))
+    body_hash = hashlib.md5((body or "").encode("utf-8")).hexdigest()
+    raw = "_".join([_AUTHX_SALT, path, nonce, ts, body_hash, _AUTHX_API_KEY])
+    sign = hashlib.md5(raw.encode("utf-8")).hexdigest()
+    return f"nonce={nonce}&timestamp={ts}&sign={sign}"
+
+
+def _admin_device_id() -> str:
+    configured = str(CONF.get("scan_admin_device_id") or "").strip()
+    if configured:
+        return configured
+    return uuid4().hex
+
+
+def _admin_configured() -> bool:
+    return bool(str(CONF.get("scan_admin_password") or "").strip())
+
+
+def _admin_password() -> str:
+    return str(CONF.get("scan_admin_password") or "").strip()
+
+
+async def _admin_login(client: httpx.AsyncClient, password_hash: str) -> "str | None":
+    """官方密码登录换 userToken：POST /user/password-login（密文直传）。"""
+    body = json.dumps({
+        "username": str(CONF.get("scan_admin_username") or "").strip(),
+        "password": password_hash,
+        "deviceId": _admin_device_id(),
+    }, ensure_ascii=False, separators=(",", ":"))
+    path = "/music/api/v1/user/password-login"
+    try:
+        req = client.build_request(
+            "POST", path, content=body.encode("utf-8"),
+            headers={"content-type": "application/json", "authx": _authx_header(path, body)},
+        )
+        resp = await client.send(req)
+        data = resp.json() if resp.status_code == 200 else {}
+        if isinstance(data, dict) and data.get("code") == 0:
+            token = str((data.get("data") or {}).get("userToken") or "").strip()
+            if token:
+                user = (data.get("data") or {}).get("user") or {}
+                logger.info("scan admin login ok (user=%s)",
+                            str(user.get("name") or "?"))
+                return token
+        logger.warning("scan admin login failed: http=%s resp=%s",
+                       resp.status_code, str(data)[:200])
+    except Exception as exc:
+        logger.warning("scan admin login error: %s", type(exc).__name__)
+    return None
+
+
+async def _admin_scan_headers(client: httpx.AsyncClient) -> "dict | None":
+    """管理员登录态请求头（Cookie: music-token）；失效自动重登，失败返回 None。"""
+    if not _admin_configured():
+        return None
+    password_hash = _admin_password()
+    token = _admin_token_cache.get(password_hash)
+    if token:
+        # 缓存 token 有效性探测
+        try:
+            req = client.build_request(
+                "GET", "/music/api/v1/user/me",
+                headers={"cookie": f"music-token={token}"},
+            )
+            resp = await client.send(req)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("code") == 0:
+                    return {"cookie": f"music-token={token}"}
+        except Exception:
+            pass
+        _admin_token_cache.pop(password_hash, None)
+    token = await _admin_login(client, password_hash)
+    if not token:
+        return None
+    _admin_token_cache[password_hash] = token
+    return {"cookie": f"music-token={token}"}
+
+
 # 按用户扫库节流：凭据指纹 → (上次触发时间, 在途任务)；凭据指纹与登录态一一对应
 _scan_state_by_user: "dict[str, dict]" = {}
 
@@ -6280,13 +6381,23 @@ def _schedule_library_scan(headers: dict | None) -> None:
         delay = max(float(CONF.get("scan_delay_s") or 0.0), 0.0)
         if delay > 0:
             await asyncio.sleep(delay)
+        client = get_upstream_client(app)
+        # 扫库需要管理员权限：配置了管理员账密时统一用管理员登录态（失效自动
+        # 重登）；未配置或登录失败回退触发者登录态（管理员本人触发不受影响）
+        req_headers = dict(headers)
+        if _admin_configured():
+            admin_headers = await _admin_scan_headers(client)
+            if admin_headers:
+                req_headers = admin_headers
+            else:
+                logger.warning("scan admin login unavailable, fall back to trigger user")
         # 任务内解析真实用户 guid（凭据指纹桶 → guid），选该用户的扫库路径；
         # 解析失败用空 guid = 全局路径
         user_guid = ""
         if bucket and str(CONF.get("library_scan_by_user") or "").strip():
             try:
                 _, user_guid, _ = await _probe_upstream_auth(
-                    _synth_request(headers), get_upstream_client(app))
+                    _synth_request(headers), client)
             except Exception as exc:
                 logger.info("scan user resolve failed: %s", type(exc).__name__)
         scan_path, scan_body = _scan_config(user_guid)
@@ -6298,8 +6409,7 @@ def _schedule_library_scan(headers: dict | None) -> None:
             global _scan_last_attempt
             _scan_last_attempt = time.monotonic()
         try:
-            client = get_upstream_client(app)
-            req_headers = dict(headers)
+            req_headers = dict(req_headers)
             if scan_body:
                 req_headers["content-type"] = "application/json"
             req = client.build_request(
@@ -6308,8 +6418,9 @@ def _schedule_library_scan(headers: dict | None) -> None:
             )
             resp = await client.send(req)
             if resp.status_code == 200:
-                logger.info("Library scan triggered via %s (user=%s)",
-                            scan_path, user_guid or "shared")
+                logger.info("Library scan triggered via %s (as=%s, user=%s)",
+                            scan_path, "admin" if req_headers is not headers else "trigger",
+                            user_guid or "shared")
             else:
                 logger.warning(
                     "Library scan %s returned %s (user=%s; check "

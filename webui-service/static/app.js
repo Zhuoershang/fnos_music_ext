@@ -611,6 +611,9 @@ function applyConfigToForm() {
   $("#bind-timeout").value = v.FNMUSIC_OFFICIAL_BIND_TIMEOUT_S || "120";
   $("#handoff-max").value = v.FNMUSIC_TEE_HANDOFF_MAX != null ? v.FNMUSIC_TEE_HANDOFF_MAX : "3";
   $("#scan-path").value = v.FNMUSIC_LIBRARY_SCAN_PATH || "";
+  $("#scan-admin-user").value = v.FNMUSIC_SCAN_ADMIN_USERNAME || "";
+  $("#scan-admin-pass").value = v.FNMUSIC_SCAN_ADMIN_PASSWORD || "";
+  $("#scan-admin-device").value = v.FNMUSIC_SCAN_ADMIN_DEVICE_ID || "";
   {
     let parsed = {};
     try {
@@ -696,6 +699,9 @@ function collectConfig() {
     FNMUSIC_OFFICIAL_BIND_TIMEOUT_S: parseInt($("#bind-timeout").value || "120", 10) || 120,
     FNMUSIC_TEE_HANDOFF_MAX: parseInt($("#handoff-max").value || "3", 10) || 0,
     FNMUSIC_LIBRARY_SCAN_PATH: $("#scan-path").value.trim(),
+    FNMUSIC_SCAN_ADMIN_USERNAME: $("#scan-admin-user").value.trim(),
+    FNMUSIC_SCAN_ADMIN_PASSWORD: $("#scan-admin-pass").value.trim(),
+    FNMUSIC_SCAN_ADMIN_DEVICE_ID: $("#scan-admin-device").value.trim(),
     FNMUSIC_TEE_SAVE_BY_USER: $("#tee-save-by-user").checked,
     FNMUSIC_SCAN_DELAY_S: parseFloat($("#scan-delay").value) || 0,
     FNMUSIC_SCAN_COOLDOWN_S: parseFloat($("#scan-cooldown").value) || 0,
@@ -2454,7 +2460,7 @@ DIR_FIELDS.forEach(bindDirField);
 })();
 
 /* -------------------------------------------------------------- 表单脏标记 */
-["#tee-max", "#llm-base", "#llm-key", "#llm-model", "#liked-refresh-hours", "#liked-size", "#search-timeout", "#search-deep-max", "#bind-timeout", "#handoff-max", "#scan-path", "#lx-resolver-timeout", "#lx-url-timeout", "#lx-probe-timeout"].forEach((sel) =>
+["#tee-max", "#llm-base", "#llm-key", "#llm-model", "#liked-refresh-hours", "#liked-size", "#search-timeout", "#search-deep-max", "#bind-timeout", "#handoff-max", "#scan-path", "#scan-admin-user", "#scan-admin-pass", "#scan-admin-device", "#lx-resolver-timeout", "#lx-url-timeout", "#lx-probe-timeout"].forEach((sel) =>
   $(sel).addEventListener("input", () => markDirty()));
 ["#llm-liked", "#llm-daily"].forEach((sel) => $(sel).addEventListener("change", () => {
   updateLlmLikedSettings();

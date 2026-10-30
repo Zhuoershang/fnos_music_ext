@@ -2821,3 +2821,15 @@ def test_by_user_ui_bindings():
     assert "FNMUSIC_LIBRARY_SCAN_BY_USER" in js
     # 扫库独立卡片
     assert 'data-help="library-scan"' in html
+
+
+def test_scan_admin_schema_and_bindings():
+    """扫库管理员账密：schema（密码为 secret）+ 前端读写接线。"""
+    assert webui.SCHEMA["FNMUSIC_SCAN_ADMIN_PASSWORD"]["kind"] == "secret"
+    assert webui.SCHEMA["FNMUSIC_SCAN_ADMIN_USERNAME"]["kind"] == "str"
+    html = open("webui-service/static/index.html", encoding="utf-8").read()
+    js = open("webui-service/static/app.js", encoding="utf-8").read()
+    for el in ("scan-admin-user", "scan-admin-pass", "scan-admin-device"):
+        assert f'id="{el}"' in html, el
+    assert 'FNMUSIC_SCAN_ADMIN_PASSWORD: $("#scan-admin-pass").value.trim()' in js
+    assert 'FNMUSIC_SCAN_ADMIN_USERNAME: $("#scan-admin-user").value.trim()' in js

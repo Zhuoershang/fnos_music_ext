@@ -1339,3 +1339,104 @@ async def test_scan_shared_bucket_falls_back_global(monkeypatch):
         assert p._scan_state_by_user == {}  # 未分桶
     finally:
         await client.aclose()
+
+
+# ------------------------------------ 管理员登录态扫库（阶段：admin auth） ----
+
+def test_authx_header_matches_official_signature():
+    """authx 签名与官方前端抓包值逐字段对齐（固定 nonce/ts/body 回放）。"""
+    calls = []
+    real_randint, real_time = p.random.randint, p.time.time
+    p.random.randint = lambda a, b: 437324
+    p.time.time = lambda: 1793349017.017
+    try:
+        h = p._authx_header("/music/api/v1/shared-library/scan",
+                            '{"guid":"64d1b8ca9f82431eb405bbd52c31618a"}')
+        calls.append(h)
+    finally:
+        p.random.randint, p.time.time = real_randint, real_time
+    assert calls[0] == ("nonce=437324&timestamp=1793349017017"
+                        "&sign=4e706381141aa109ac475711f26e66e5")
+
+
+@pytest.mark.anyio
+async def test_admin_scan_headers_login_and_cache(monkeypatch):
+    """登录换 token → 缓存复用；缓存失效自动重登；失败回退 None。"""
+    logins = []
+    bodies = []
+
+    class T(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            bodies.append(request.url.path)
+            if request.url.path == "/music/api/v1/user/password-login":
+                logins.append(request.content.decode())
+                return httpx.Response(200, json={
+                    "code": 0, "data": {"userToken": "tok-1",
+                                        "user": {"name": "admin", "guid": "g1"}}})
+            # /user/me 探测
+            if request.headers.get("cookie") == "music-token=tok-1":
+                return httpx.Response(200, json={"code": 0, "data": {"guid": "g1"}})
+            return httpx.Response(401, json={"code": 401})
+
+    client = httpx.AsyncClient(transport=T(), base_url="http://unix")
+    monkeypatch.setitem(p.CONF, "scan_admin_username", "admin")
+    monkeypatch.setitem(p.CONF, "scan_admin_password", "a" * 64)
+    monkeypatch.setitem(p.CONF, "scan_admin_device_id", "d" * 32)
+    p._admin_token_cache.clear()
+    try:
+        import json as _json
+        headers = await p._admin_scan_headers(client)
+        assert headers == {"cookie": "music-token=tok-1"}
+        body = _json.loads(logins[0])
+        assert body["username"] == "admin" and body["password"] == "a" * 64
+        assert len(body["deviceId"]) == 32
+        # 第二次调用：缓存命中（me 探测 200），不再登录
+        again = await p._admin_scan_headers(client)
+        assert again == {"cookie": "music-token=tok-1"}
+        assert len(logins) == 1
+        # token 失效（me 401）→ 重登拿新 token
+        p._admin_token_cache.clear()
+        monkeypatch.setitem(p.CONF, "scan_admin_password", "b" * 64)
+        headers3 = await p._admin_scan_headers(client)
+        assert headers3 == {"cookie": "music-token=tok-1"}
+        assert len(logins) == 2
+        assert _json.loads(logins[1])["password"] == "b" * 64
+    finally:
+        await client.aclose()
+        p._admin_token_cache.clear()
+
+
+@pytest.mark.anyio
+async def test_schedule_scan_uses_admin_headers(monkeypatch):
+    """配置管理员账密后扫库请求带管理员 Cookie（而非触发者）。"""
+    monkeypatch.setitem(p.CONF, "library_scan_path", "/scan")
+    monkeypatch.setitem(p.CONF, "scan_delay_s", 0)
+    monkeypatch.setitem(p.CONF, "scan_cooldown_s", 300)
+    seen = []
+
+    class T(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            seen.append((request.url.path, request.headers.get("cookie")))
+            if request.url.path == "/music/api/v1/user/password-login":
+                return httpx.Response(200, json={
+                    "code": 0, "data": {"userToken": "adm-token",
+                                        "user": {"name": "admin", "guid": "g1"}}})
+            if request.url.path == "/music/api/v1/user/me":
+                # 触发者探测：非管理员登录态按 401 处理也行，这里都放行
+                return httpx.Response(200, json={"code": 0, "data": {"guid": "u-9"}})
+            return httpx.Response(200, json={"code": 0})
+
+    client = httpx.AsyncClient(transport=T(), base_url="http://unix")
+    monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_username", "admin")
+    monkeypatch.setitem(p.CONF, "scan_admin_password", "c" * 64)
+    monkeypatch.setitem(p.CONF, "scan_admin_device_id", "d" * 32)
+    p._admin_token_cache.clear()
+    try:
+        p._schedule_library_scan({"cookie": "music-token=trigger-user"})
+        await asyncio.wait_for(p._scan_task, timeout=5.0)
+        scan_posts = [s for s in seen if s[0] == "/scan"]
+        assert scan_posts == [("/scan", "music-token=adm-token")]
+    finally:
+        await client.aclose()
+        p._admin_token_cache.clear()
