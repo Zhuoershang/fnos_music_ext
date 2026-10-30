@@ -1007,6 +1007,9 @@ def test_staged_reuse_promotes_shadow_lyric_without_touching_audio(tmp_path, mon
     assert not os.path.exists(shadow)
     with open(os.path.splitext(dest)[0] + ".lrc", encoding="utf-8") as f:
         assert "影子歌词" in f.read()
+
+
+@pytest.mark.anyio
 async def test_library_scan_config_body_and_headers(monkeypatch):
     """「路径|JSON体」配置：请求带 JSON body 与 content-type；凭证头（含
     authx 新鲜签名）原样透传。"""
