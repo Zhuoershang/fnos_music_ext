@@ -309,11 +309,15 @@ def _maintenance_target(head_raw: bytes):
     if target.startswith(prefix + "/"):
         target = target[len(prefix):]
     # Reserve the entire namespace, including malformed/unknown maintenance paths.
+    # 规范化：折叠重复斜杠（统一网关/客户端可能产生 //api/...，否则穿透到
+    # WebUI 容器得到 501/404 误导提示）；方法大小写交给路由判定。
+    while "//" in target:
+        target = target.replace("//", "/")
     decoded = unquote(target)
     if decoded.startswith(prefix + "/"):
         decoded = decoded[len(prefix):]
     if target.startswith(MAINTENANCE_ROOT) or decoded.startswith(MAINTENANCE_ROOT):
-        return parts[0], target
+        return parts[0].upper(), target
     return None
 
 
@@ -347,7 +351,12 @@ def handle_maintenance(client: socket.socket, head_raw: bytes, method: str, targ
                            re.fullmatch(ORGANIZE_PATH + r"/[0-9a-fA-F]{32}", target) is not None)))
         # 音乐用户列表只读，走同一条管理员维护通道（GET，无请求体）
         users_route = method == "GET" and target == MAINTENANCE_ROOT + "/music-users"
-        if not (cleanup_route or organize_route or users_route):
+        # 扫库管理员登录测试 / 手动扫库（POST + JSON 体）
+        scan_test_route = method == "POST" and target == MAINTENANCE_ROOT + "/scan-admin-test"
+        scan_manual_route = method == "POST" and target == MAINTENANCE_ROOT + "/scan-manual"
+        scan_all_route = method == "POST" and target == MAINTENANCE_ROOT + "/scan-all"
+        if not (cleanup_route or organize_route or users_route
+                or scan_test_route or scan_manual_route or scan_all_route):
             client.sendall(_json_response(404, {"ok": False, "error": "未知维护接口"}))
             return
         if "transfer-encoding" in headers:
@@ -372,6 +381,17 @@ def handle_maintenance(client: socket.socket, head_raw: bytes, method: str, targ
                 if req != {"confirm_beta": True} or type(req.get("confirm_beta")) is not bool:
                     raise ValueError("仅允许 confirm_beta: true 确认字段")
                 body = b'{"confirm_beta":true}'
+            elif target in (MAINTENANCE_ROOT + "/scan-admin-test",
+                            MAINTENANCE_ROOT + "/scan-manual",
+                            MAINTENANCE_ROOT + "/scan-all"):
+                # 登录测试/全库扫描空体 / 手动扫库仅 guid 字段，转发给 proxy 校验
+                if scan_manual_route and (not isinstance(req, dict)
+                                          or set(req) != {"guid"}
+                                          or not isinstance(req.get("guid"), str)):
+                    raise ValueError("手动扫库仅允许 guid 字段")
+                if scan_all_route and req != {}:
+                    raise ValueError("全库扫描不允许携带参数")
+                body = json.dumps(req, separators=(",", ":")).encode("utf-8")
             else:
                 if (not isinstance(req, dict) or
                         set(req) != {"confirm_beta", "root", "layout"} or

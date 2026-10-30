@@ -131,6 +131,7 @@ SCHEMA: dict[str, dict] = {
     "FNMUSIC_PUBLIC_PLAYLISTS_SELECTION": {"kind": "str", "default": "[]", "group": "recommend", "reload": "hot", "label": "公共歌单选择"},
     "FNMUSIC_PUBLIC_PLAYLISTS_BY_USER": {"kind": "str", "default": "", "group": "recommend", "reload": "hot", "label": "各用户公共歌单"},
     "FNMUSIC_TEE_SAVE_ENABLED": {"kind": "bool", "default": "true", "group": "tee", "reload": "hot", "label": "边听边存"},
+    "FNMUSIC_TEE_SAVE_BY_USER": {"kind": "bool", "default": "false", "group": "storage", "reload": "hot", "label": "按用户分下载目录"},
     "FNMUSIC_TEE_SAVE_DIR": {"kind": "dir", "default": "", "group": "storage", "reload": "hot", "label": "下载目录（留空自动探测共享曲库）"},
     "FNMUSIC_DOWNLOAD_LAYOUT": {"kind": "enum", "values": ["flat", "artist", "album", "artist_album"], "default": "flat", "group": "storage", "reload": "hot", "label": "存放方式（beta）"},
     "FNMUSIC_TEE_SAVE_MODE": {"kind": "enum", "values": ["auto", "direct", "staged"], "default": "auto", "group": "storage", "reload": "hot", "label": "落盘方式"},
@@ -142,6 +143,10 @@ SCHEMA: dict[str, dict] = {
     "FNMUSIC_OFFICIAL_BIND_TIMEOUT_S": {"kind": "int", "default": "120", "min": 10, "max": 3600, "group": "tee", "reload": "hot", "label": "官方绑定等待（秒）"},
     "FNMUSIC_TEE_HANDOFF_MAX": {"kind": "int", "default": "3", "min": 0, "max": 20, "group": "tee", "reload": "hot", "label": "切歌续传并行数"},
     "FNMUSIC_LIBRARY_SCAN_PATH": {"kind": "str", "default": "", "group": "tee", "reload": "hot", "label": "曲库重扫接口（选填）"},
+    "FNMUSIC_LIBRARY_SCAN_BY_USER": {"kind": "str", "default": "", "group": "tee", "reload": "hot", "label": "各用户曲库重扫接口"},
+    "FNMUSIC_SCAN_ADMIN_USERNAME": {"kind": "str", "default": "", "group": "tee", "reload": "hot", "label": "扫库管理员用户名（选填）"},
+    "FNMUSIC_SCAN_ADMIN_PASSWORD": {"kind": "secret", "default": "", "group": "tee", "reload": "hot", "label": "扫库管理员密码密文"},
+    "FNMUSIC_SCAN_ADMIN_DEVICE_ID": {"kind": "str", "default": "", "group": "tee", "reload": "hot", "label": "扫库登录设备 ID（选填）"},
     "FNMUSIC_SCAN_DELAY_S": {"kind": "int", "default": "3", "min": 0, "max": 600, "group": "tee", "reload": "hot", "label": "落盘后延迟（秒）"},
     "FNMUSIC_SCAN_COOLDOWN_S": {"kind": "int", "default": "90", "min": 0, "max": 3600, "group": "tee", "reload": "hot", "label": "扫描冷却窗口（秒）"},
     "FNMUSIC_LLM_BASE_URL": {"kind": "str", "default": "", "group": "llm", "reload": "hot", "label": "OpenAI 兼容 Base URL"},
@@ -179,6 +184,40 @@ def current_provider(values: dict[str, str]) -> str:
     return ""
 
 
+def _validate_scan_by_user(raw: object) -> dict[str, str]:
+    """校验每用户扫库配置：{"<guid>": "路径|JSON体"}；空串=该用户禁用扫库。"""
+    if raw in (None, ""):
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError("各用户曲库重扫接口必须是 JSON 对象") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("各用户曲库重扫接口必须是 JSON 对象")
+    out: dict[str, str] = {}
+    for guid, value in raw.items():
+        key = str(guid or "").strip()
+        if not key or len(key) > 256:
+            raise ValueError("曲库重扫用户 GUID 无效")
+        text = str(value if value is not None else "").strip()
+        if not text:
+            out[key] = ""
+            continue
+        path, _, body = text.partition("|")
+        path = path.strip()
+        if not path.startswith("/"):
+            raise ValueError(f"用户 {key} 的扫库接口路径必须以 / 开头")
+        body = body.strip()
+        if body:
+            try:
+                json.loads(body)
+            except ValueError as exc:
+                raise ValueError(f"用户 {key} 的扫库 JSON 参数无效") from exc
+        out[key] = f"{path}|{body}" if body else path
+    return out
+
+
 def write_env(updates: dict[str, str]) -> list[str]:
     with env_file_lock(ENV_PATH):
         updates = dict(updates)
@@ -190,6 +229,10 @@ def write_env(updates: dict[str, str]) -> list[str]:
             mapping.update(pubpl.validate_user_selections(updates["FNMUSIC_PUBLIC_PLAYLISTS_BY_USER"]))
             updates["FNMUSIC_PUBLIC_PLAYLISTS_BY_USER"] = json.dumps(
                 mapping, ensure_ascii=False, separators=(",", ":"))
+        if "FNMUSIC_LIBRARY_SCAN_BY_USER" in updates:
+            updates["FNMUSIC_LIBRARY_SCAN_BY_USER"] = json.dumps(
+                _validate_scan_by_user(updates["FNMUSIC_LIBRARY_SCAN_BY_USER"]),
+                ensure_ascii=False, separators=(",", ":"))
         return _write_env_unlocked(updates)
 
 
@@ -1880,6 +1923,13 @@ async def api_maintenance_music_users():
     raise HTTPException(status_code=501, detail="直连模式不支持读取飞牛音乐用户，请在飞牛桌面内打开管理台")
 
 
+@app.post("/api/maintenance/scan-admin-test")
+@app.post("/api/maintenance/scan-manual")
+async def api_maintenance_scan_actions():
+    """Scan login-test / manual-scan run on the host proxy via the desktop gateway."""
+    raise HTTPException(status_code=501, detail="直连模式不支持扫库管理操作，请在飞牛桌面内打开管理台")
+
+
 @app.get("/api/maintenance/organize")
 @app.get("/api/maintenance/organize/{job_id}")
 @app.post("/api/maintenance/organize")
@@ -2117,6 +2167,9 @@ class DesktopPrefixMiddleware:
             if path == self.prefix or path.startswith(self.prefix + "/"):
                 scope = dict(scope)
                 stripped = path[len(self.prefix):] or "/"
+                # 折叠重复斜杠：统一网关/客户端可能产生 //api/...，避免 404
+                while "//" in stripped:
+                    stripped = stripped.replace("//", "/")
                 scope["path"] = stripped
                 if isinstance(scope.get("raw_path"), (bytes, bytearray)):
                     scope["raw_path"] = stripped.encode("ascii")
