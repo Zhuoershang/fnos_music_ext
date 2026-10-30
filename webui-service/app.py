@@ -2167,6 +2167,9 @@ class DesktopPrefixMiddleware:
             if path == self.prefix or path.startswith(self.prefix + "/"):
                 scope = dict(scope)
                 stripped = path[len(self.prefix):] or "/"
+                # 折叠重复斜杠：统一网关/客户端可能产生 //api/...，避免 404
+                while "//" in stripped:
+                    stripped = stripped.replace("//", "/")
                 scope["path"] = stripped
                 if isinstance(scope.get("raw_path"), (bytes, bytearray)):
                     scope["raw_path"] = stripped.encode("ascii")

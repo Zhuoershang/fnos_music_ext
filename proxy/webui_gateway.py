@@ -309,11 +309,15 @@ def _maintenance_target(head_raw: bytes):
     if target.startswith(prefix + "/"):
         target = target[len(prefix):]
     # Reserve the entire namespace, including malformed/unknown maintenance paths.
+    # 规范化：折叠重复斜杠（统一网关/客户端可能产生 //api/...，否则穿透到
+    # WebUI 容器得到 501/404 误导提示）；方法大小写交给路由判定。
+    while "//" in target:
+        target = target.replace("//", "/")
     decoded = unquote(target)
     if decoded.startswith(prefix + "/"):
         decoded = decoded[len(prefix):]
     if target.startswith(MAINTENANCE_ROOT) or decoded.startswith(MAINTENANCE_ROOT):
-        return parts[0], target
+        return parts[0].upper(), target
     return None
 
 
