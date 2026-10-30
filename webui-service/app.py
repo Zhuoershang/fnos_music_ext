@@ -1923,6 +1923,13 @@ async def api_maintenance_music_users():
     raise HTTPException(status_code=501, detail="直连模式不支持读取飞牛音乐用户，请在飞牛桌面内打开管理台")
 
 
+@app.post("/api/maintenance/scan-admin-test")
+@app.post("/api/maintenance/scan-manual")
+async def api_maintenance_scan_actions():
+    """Scan login-test / manual-scan run on the host proxy via the desktop gateway."""
+    raise HTTPException(status_code=501, detail="直连模式不支持扫库管理操作，请在飞牛桌面内打开管理台")
+
+
 @app.get("/api/maintenance/organize")
 @app.get("/api/maintenance/organize/{job_id}")
 @app.post("/api/maintenance/organize")
