@@ -1098,7 +1098,10 @@ async function runManualScan(guid, btn) {
   btn.textContent = "扫描中…";
   show("正在触发扫描…");
   try {
-    const res = await api("/api/maintenance/scan-manual", { method: "POST", body: { guid: scanGuid } });
+    const res = await api("/api/maintenance/scan-manual", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ guid: scanGuid }),
+  });
     const when = new Date(res.tested_at ? res.tested_at * 1000 : Date.now()).toLocaleTimeString();
     show((res.ok ? "✓ " : "✕ ") + (res.message || res.error || "未知结果") + `（${when}）`);
   } catch (exc) {
@@ -1119,7 +1122,10 @@ async function testScanAdminLogin() {
     if (dirty) {
       await saveConfig();
     }
-    const res = await api("/api/maintenance/scan-admin-test", { method: "POST", body: {} });
+    const res = await api("/api/maintenance/scan-admin-test", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
     const when = new Date(res.tested_at ? res.tested_at * 1000 : Date.now()).toLocaleTimeString();
     out.textContent = ((res.ok ? "✓ " : "✕ ") + (res.message || res.error || "未知结果") + `（${when}）`);
   } catch (exc) {
