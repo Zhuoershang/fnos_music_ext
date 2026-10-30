@@ -1301,13 +1301,15 @@ async def test_scan_by_user_independent(monkeypatch):
         tasks = [s["task"] for s in p._scan_state_by_user.values() if s["task"]]
         if p._scan_task:
             tasks.append(p._scan_task)
+        assert tasks, "两个用户的扫库任务都应已创建"
         await asyncio.gather(*[asyncio.wait_for(t, timeout=5.0) for t in tasks])
         assert ("/u1/scan", "sid=u1", "application/json") in posts
         assert ("/global/scan", "sid=u2", None) in posts
         # 冷却窗口内同用户不重发
         before = len(posts)
         p._schedule_library_scan({"cookie": "sid=u1"})
-        await asyncio.sleep(0.1)
+        for _ in range(20):
+            await asyncio.sleep(0.05)
         assert len(posts) == before
     finally:
         await client.aclose()
