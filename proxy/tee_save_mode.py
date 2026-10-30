@@ -46,7 +46,9 @@ def classify_fnos_path(path: str):
     if len(num) >= 2 and num.startswith("0"):
         return "remote", "信号A:卷号带前导零"
 
-    return "local", "卷号无前导零且第二段为纯 uid"
+    if seg2.isdecimal():
+        return "local", "卷号无前导零且第二段为纯 uid"
+    return None, "未知飞牛卷目录形态"
 
 
 # ---------------------------------------------------------------- 通用兜底
@@ -102,8 +104,8 @@ def should_stage(target_dir: str, cache_dir: str, mode: str = "auto"):
     判定优先级（风险不对称：误判 direct 会把 .part 写进远程，不可逆；
     误判 staged 只多一次本地拷贝，可承受 → 故拿不准一律 staged）：
       1. 显式配置 direct / staged
-      2. 飞牛卷规则
-      3. /proc/mounts 文件系统类型
+      2. 解析真实路径，识别飞牛远程卷
+      3. /proc/mounts 网络类型（优先于本地卷路径，识别嵌套挂载）
       4. st_dev 比较
       5. 兜底 staged
     """
@@ -118,17 +120,18 @@ def should_stage(target_dir: str, cache_dir: str, mode: str = "auto"):
     if not target_dir or not cache_dir:
         return True, "路径缺失，兜底 staged"
 
-    # 2. 飞牛卷规则
+    # 符号链接可能把本地卷内的目录指到远程卷。
+    target_dir = os.path.realpath(target_dir)
     kind, why = classify_fnos_path(target_dir)
     if kind == "remote":
         return True, f"飞牛规则判定远程({why})"
-    if kind == "local":
-        return False, f"飞牛规则判定本地({why})"
 
     # 3. 文件系统类型
     fstype = mount_fstype(target_dir)
     if fstype in REMOTE_FS:
         return True, f"挂载类型 {fstype} 属网络文件系统"
+    if kind == "local":
+        return False, f"飞牛规则判定本地({why})"
 
     # 4. st_dev 比较
     a, b = _st_dev(target_dir), _st_dev(cache_dir)
