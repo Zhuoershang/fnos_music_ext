@@ -6414,7 +6414,10 @@ async def _maintenance_scan_admin_login() -> tuple[int, dict]:
                                    headers={"cookie": f"music-token={token}"})
         resp = await client.send(req)
         data = resp.json() if resp.status_code == 200 else {}
-        user = (data.get("data") or {}).get("user") or {}
+        # /user/me 的 data 直接平铺 guid/name/role（与 password-login 的
+        # data.user 嵌套不同）；兼容两种形态
+        info = (data.get("data") or {}) if isinstance(data, dict) else {}
+        user = info.get("user") or info
         who = f"{user.get('name') or '?'}（{user.get('role') or '?'}）"
     except Exception:
         pass
