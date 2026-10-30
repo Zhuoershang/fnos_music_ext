@@ -6309,10 +6309,12 @@ async def _admin_login(client: httpx.AsyncClient, password_hash: str) -> "str | 
                             str(user.get("name") or "?"))
                 return token
         logger.warning(
-            "scan admin login failed: http=%s code=%s msg=%s (body: username=%r password_len=%d)",
+            "scan admin login failed: http=%s code=%s msg=%s (body: username=%r "
+            "password_len=%d fingerprint=%s…%s)",
             resp.status_code, data.get("code") if isinstance(data, dict) else "?",
             str(data.get("msg") if isinstance(data, dict) else "")[:80],
-            str(CONF.get("scan_admin_username") or ""), len(password_hash))
+            str(CONF.get("scan_admin_username") or ""), len(password_hash),
+            password_hash[:6], password_hash[-4:])
     except Exception as exc:
         logger.warning("scan admin login error: %s", type(exc).__name__)
     return None
