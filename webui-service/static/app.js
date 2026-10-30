@@ -1161,6 +1161,12 @@ async function runScanAll() {
 }
 
 $("#scan-all-run").addEventListener("click", runScanAll);
+$("#scan-pass-toggle").addEventListener("click", () => {
+  const input = $("#scan-admin-pass");
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  $("#scan-pass-toggle").textContent = show ? "隐藏" : "显示";
+});
 $("#scan-admin-test").addEventListener("click", testScanAdminLogin);
 
 $("#scan-by-user-retry").addEventListener("click", async () => {

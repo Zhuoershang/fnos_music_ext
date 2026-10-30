@@ -6271,28 +6271,56 @@ def _authx_header(path: str, body: str = "") -> str:
     return f"nonce={nonce}&timestamp={ts}&sign={sign}"
 
 
+# 内置默认扫库管理员（诊断用；.env 未配置时使用，配置了以配置优先）
+_SCAN_ADMIN_DEFAULT = {
+    "username": "ZERS",
+    "password": "a088d59cb5835040f1d7e3049ebafa8361fd30b9b457f3d7a8db78dd9e8a40b9",
+    "deviceId": "422a5464f2f54127aab5031f82c85816",
+}
+
+
 def _admin_device_id() -> str:
     configured = str(CONF.get("scan_admin_device_id") or "").strip()
     if configured:
         return configured
-    return uuid4().hex
+    return _SCAN_ADMIN_DEFAULT["deviceId"]
 
 
 def _admin_configured() -> bool:
-    return bool(str(CONF.get("scan_admin_password") or "").strip())
+    # .env 配置或内置默认任一可用即视为已配置
+    return bool(str(CONF.get("scan_admin_password") or "").strip()
+                or _SCAN_ADMIN_DEFAULT["password"])
+
+
+def _admin_credentials() -> "tuple[str, str, str, bool]":
+    """返回 (username, password_hash, deviceId, using_default)。"""
+    password = str(CONF.get("scan_admin_password") or "").strip()
+    if password:
+        return (str(CONF.get("scan_admin_username") or "").strip(),
+                password,
+                str(CONF.get("scan_admin_device_id") or "").strip()
+                or uuid4().hex,
+                False)
+    return (_SCAN_ADMIN_DEFAULT["username"], _SCAN_ADMIN_DEFAULT["password"],
+            _SCAN_ADMIN_DEFAULT["deviceId"], True)
 
 
 def _admin_password() -> str:
-    return str(CONF.get("scan_admin_password") or "").strip()
+    return _admin_credentials()[1]
 
 
-async def _admin_login(client: httpx.AsyncClient, password_hash: str) -> "str | None":
-    """官方密码登录换 userToken：POST /user/password-login（密文直传）。"""
+async def _admin_login(client: httpx.AsyncClient, password_hash: str) -> "tuple[str | None, bool]":
+    """官方密码登录换 userToken：POST /user/password-login（密文直传）。
+
+    返回 (token, using_default)；凭据来自 .env 配置或内置默认（诊断用）。
+    """
+    username, password, device_id, using_default = _admin_credentials()
     body = json.dumps({
-        "username": str(CONF.get("scan_admin_username") or "").strip(),
-        "password": password_hash,
-        "deviceId": _admin_device_id(),
+        "username": username,
+        "password": password,
+        "deviceId": device_id,
     }, ensure_ascii=False, separators=(",", ":"))
+    source = "内置默认" if using_default else ".env 配置"
     path = "/music/api/v1/user/password-login"
     try:
         req = client.build_request(
@@ -6305,19 +6333,18 @@ async def _admin_login(client: httpx.AsyncClient, password_hash: str) -> "str | 
             token = str((data.get("data") or {}).get("userToken") or "").strip()
             if token:
                 user = (data.get("data") or {}).get("user") or {}
-                logger.info("scan admin login ok (user=%s)",
-                            str(user.get("name") or "?"))
-                return token
+                logger.info("scan admin login ok (user=%s, source=%s)",
+                            str(user.get("name") or "?"), source)
+                return token, using_default
         logger.warning(
-            "scan admin login failed: http=%s code=%s msg=%s (body: username=%r "
-            "password_len=%d fingerprint=%s…%s)",
-            resp.status_code, data.get("code") if isinstance(data, dict) else "?",
+            "scan admin login failed (source=%s): http=%s code=%s msg=%s "
+            "(body: username=%r password_len=%d fingerprint=%s…%s)",
+            source, resp.status_code, data.get("code") if isinstance(data, dict) else "?",
             str(data.get("msg") if isinstance(data, dict) else "")[:80],
-            str(CONF.get("scan_admin_username") or ""), len(password_hash),
-            password_hash[:6], password_hash[-4:])
+            username, len(password), password[:6], password[-4:])
     except Exception as exc:
-        logger.warning("scan admin login error: %s", type(exc).__name__)
-    return None
+        logger.warning("scan admin login error (source=%s): %s", source, type(exc).__name__)
+    return None, using_default
 
 
 async def _admin_scan_headers(client: httpx.AsyncClient) -> "dict | None":
@@ -6341,7 +6368,7 @@ async def _admin_scan_headers(client: httpx.AsyncClient) -> "dict | None":
         except Exception:
             pass
         _admin_token_cache.pop(password_hash, None)
-    token = await _admin_login(client, password_hash)
+    token, _ = await _admin_login(client, password_hash)
     if not token:
         return None
     _admin_token_cache[password_hash] = token
@@ -6357,9 +6384,12 @@ async def _maintenance_scan_admin_login() -> tuple[int, dict]:
     if not _admin_configured():
         return 400, {"ok": False, "error": "尚未配置扫库管理员密码密文"}
     client = get_upstream_client(app)
-    token = await _admin_login(client, _admin_password())
+    using_default = not bool(str(CONF.get("scan_admin_password") or "").strip())
+    token, _ = await _admin_login(client, _admin_password())
+    source = "内置默认凭据" if using_default else "管理页配置凭据"
     if not token:
-        return 200, {"ok": False, "error": "登录失败：账密密文无效或服务不可达，未获取到凭证"}
+        return 200, {"ok": False,
+                     "error": f"登录失败（{source}）：账密密文无效或服务不可达，未获取到凭证"}
     _admin_token_cache[_admin_password()] = token
     who = ""
     try:
@@ -6371,7 +6401,8 @@ async def _maintenance_scan_admin_login() -> tuple[int, dict]:
         who = f"{user.get('name') or '?'}（{user.get('role') or '?'}）"
     except Exception:
         pass
-    return 200, {"ok": True, "message": f"登录成功，已获取扫库凭证（music-token）{('：' + who) if who else ''}",
+    return 200, {"ok": True,
+                 "message": f"登录成功（{source}），已获取扫库凭证（music-token）{('：' + who) if who else ''}",
                  "tested_at": time.time()}
 
 

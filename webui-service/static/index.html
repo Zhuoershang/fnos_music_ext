@@ -313,8 +313,8 @@
           <label class="field"><span>扫库管理员用户名（选填）</span>
             <input class="input" id="scan-admin-user" placeholder="留空=从登录响应识别">
           </label>
-          <label class="field"><span>扫库管理员密码密文</span>
-            <input class="input" id="scan-admin-pass" type="password" placeholder="官方登录请求中 password 字段的 64 位密文；留空=用触发者登录态扫库">
+          <label class="field"><span>扫库管理员密码密文 <button class="btn" id="scan-pass-toggle" type="button" style="padding:0 10px;margin-left:8px">显示</button></span>
+            <input class="input" id="scan-admin-pass" type="password" autocomplete="off" spellcheck="false" placeholder="官方登录请求中 password 字段的 64 位密文；留空=用触发者登录态扫库">
           </label>
           <label class="field"><span>扫库登录设备 ID（选填）</span>
             <input class="input" id="scan-admin-device" placeholder="留空=每次登录随机生成（一般无需填写）">

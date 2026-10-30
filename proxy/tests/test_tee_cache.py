@@ -1154,6 +1154,12 @@ def test_scan_number_defaults_on_invalid():
 def _by_user_state(monkeypatch):
     monkeypatch.setitem(p.CONF, "tee_save_by_user", False)
     monkeypatch.setitem(p.CONF, "library_scan_by_user", "")
+    # 内置默认管理员凭据会让 _admin_configured 恒真：默认禁用（返回 None），
+    # 管理员相关用例用 monkeypatch.setattr(p, "_admin_scan_headers", REAL_ADMIN) 恢复
+    async def _no_admin(_client):
+        return None
+    p.__dict__["_REAL_ADMIN_HEADERS_ORIGINAL"] = p._admin_scan_headers
+    monkeypatch.setattr(p, "_admin_scan_headers", _no_admin)
     monkeypatch.setattr(p, "_music_user_names", {})
     monkeypatch.setattr(p, "_music_user_names_at", 0.0)
     monkeypatch.setattr(p, "_scan_state_by_user", {})
@@ -1380,8 +1386,11 @@ async def test_admin_scan_headers_login_and_cache(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setitem(p.CONF, "scan_admin_username", "admin")
+    monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_username", "admin")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "a" * 64)
     monkeypatch.setitem(p.CONF, "scan_admin_device_id", "d" * 32)
+    monkeypatch.setattr(p, "_admin_scan_headers", p._REAL_ADMIN_HEADERS_ORIGINAL)
     p._admin_token_cache.clear()
     try:
         import json as _json
@@ -1431,6 +1440,7 @@ async def test_schedule_scan_uses_admin_headers(monkeypatch):
     monkeypatch.setitem(p.CONF, "scan_admin_username", "admin")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "c" * 64)
     monkeypatch.setitem(p.CONF, "scan_admin_device_id", "d" * 32)
+    monkeypatch.setattr(p, "_admin_scan_headers", p._REAL_ADMIN_HEADERS_ORIGINAL)
     p._admin_token_cache.clear()
     try:
         p._schedule_library_scan({"cookie": "music-token=trigger-user"})
@@ -1446,10 +1456,8 @@ async def test_schedule_scan_uses_admin_headers(monkeypatch):
 
 @pytest.mark.anyio
 async def test_maintenance_scan_admin_test(monkeypatch):
-    """登录测试：未配置 400；配置后真实登录并缓存 token，回显身份。"""
+    """登录测试：配置密文优先于内置默认；成功回显身份并缓存 token。"""
     monkeypatch.setitem(p.CONF, "scan_admin_password", "")
-    code, out = await p._maintenance_scan_admin_login()
-    assert code == 400 and "未配置" in out["error"]
 
     class T(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -1469,9 +1477,10 @@ async def test_maintenance_scan_admin_test(monkeypatch):
         code, out = await p._maintenance_scan_admin_login()
         assert code == 200 and out["ok"] is True
         assert "boss" in out["message"] and "admin" in out["message"]
+        assert "管理页配置凭据" in out["message"]
         assert p._admin_token_cache["x" * 64] == "tk9"
         # 密码错误：登录失败 ok=False
-        async def fail_login(c, pw): return None
+        async def fail_login(c, pw): return (None, False)
         monkeypatch.setattr(p, "_admin_login", fail_login)
         code, out = await p._maintenance_scan_admin_login()
         assert code == 200 and out["ok"] is False and "未获取到凭证" in out["error"]
@@ -1501,7 +1510,9 @@ async def test_maintenance_scan_manual(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_username", "boss")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "y" * 64)
+    monkeypatch.setattr(p, "_admin_scan_headers", p._REAL_ADMIN_HEADERS_ORIGINAL)
     p._admin_token_cache.clear()
     try:
         guid = "a" * 32
@@ -1554,7 +1565,9 @@ async def test_scan_manual_reports_code_hint(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_username", "u")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "z" * 64)
+    monkeypatch.setattr(p, "_admin_scan_headers", p._REAL_ADMIN_HEADERS_ORIGINAL)
     p._admin_token_cache.clear()
     try:
         code, out = await p._maintenance_scan_manual("a" * 32)
@@ -1583,7 +1596,9 @@ async def test_maintenance_scan_all(monkeypatch):
 
     client = httpx.AsyncClient(transport=T(), base_url="http://unix")
     monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_username", "u")
     monkeypatch.setitem(p.CONF, "scan_admin_password", "s" * 64)
+    monkeypatch.setattr(p, "_admin_scan_headers", p._REAL_ADMIN_HEADERS_ORIGINAL)
     p._admin_token_cache.clear()
     try:
         code, out = await p._maintenance_scan_all()
