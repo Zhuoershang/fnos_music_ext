@@ -1440,3 +1440,90 @@ async def test_schedule_scan_uses_admin_headers(monkeypatch):
     finally:
         await client.aclose()
         p._admin_token_cache.clear()
+
+
+# ------------------------------ 登录测试 / 手动扫库维护接口（2.11.11-4） ----
+
+@pytest.mark.anyio
+async def test_maintenance_scan_admin_test(monkeypatch):
+    """登录测试：未配置 400；配置后真实登录并缓存 token，回显身份。"""
+    monkeypatch.setitem(p.CONF, "scan_admin_password", "")
+    code, out = await p._maintenance_scan_admin_login()
+    assert code == 400 and "未配置" in out["error"]
+
+    class T(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == "/music/api/v1/user/password-login":
+                return httpx.Response(200, json={"code": 0, "data": {
+                    "userToken": "tk9", "user": {"name": "boss", "role": "admin", "guid": "g"}}})
+            if request.url.path == "/music/api/v1/user/me":
+                return httpx.Response(200, json={"code": 0, "data": {
+                    "user": {"name": "boss", "role": "admin"}}})
+            return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=T(), base_url="http://unix")
+    monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_password", "x" * 64)
+    p._admin_token_cache.clear()
+    try:
+        code, out = await p._maintenance_scan_admin_login()
+        assert code == 200 and out["ok"] is True
+        assert "boss" in out["message"] and "admin" in out["message"]
+        assert p._admin_token_cache["x" * 64] == "tk9"
+        # 密码错误：登录失败 ok=False
+        async def fail_login(c, pw): return None
+        monkeypatch.setattr(p, "_admin_login", fail_login)
+        code, out = await p._maintenance_scan_admin_login()
+        assert code == 200 and out["ok"] is False and "未获取到凭证" in out["error"]
+    finally:
+        await client.aclose()
+        p._admin_token_cache.clear()
+
+
+@pytest.mark.anyio
+async def test_maintenance_scan_manual(monkeypatch):
+    """手动扫库：管理员登录态请求官方 scan 接口，成功/失败均回显结果与时间。"""
+    posts = []
+
+    class T(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            if request.url.path == "/music/api/v1/user/password-login":
+                return httpx.Response(200, json={"code": 0, "data": {
+                    "userToken": "tm", "user": {"name": "boss", "guid": "g"}}})
+            if request.url.path == "/music/api/v1/user/me":
+                return httpx.Response(200, json={"code": 0, "data": {"guid": "g"}})
+            if request.url.path == "/music/api/v1/shared-library/scan":
+                posts.append((request.headers.get("cookie"),
+                              request.headers.get("content-type"),
+                              request.content.decode()))
+                return httpx.Response(200, json={"code": 0, "data": None})
+            return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=T(), base_url="http://unix")
+    monkeypatch.setattr(p, "get_upstream_client", lambda a: client)
+    monkeypatch.setitem(p.CONF, "scan_admin_password", "y" * 64)
+    p._admin_token_cache.clear()
+    try:
+        guid = "a" * 32
+        code, out = await p._maintenance_scan_manual(guid)
+        assert code == 200 and out["ok"] is True and out["message"] == "扫描已触发"
+        assert posts == [("music-token=tm", "application/json",
+                          '{"guid":"' + guid + '"}')]
+        assert out["tested_at"] > 0
+        # 官方返回非 0 code → ok=False 带原因
+        class T2(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                if request.url.path.endswith("password-login"):
+                    return httpx.Response(200, json={"code": 0, "data": {
+                        "userToken": "tm", "user": {"name": "b", "guid": "g"}}})
+                if request.url.path.endswith("user/me"):
+                    return httpx.Response(200, json={"code": 0, "data": {"guid": "g"}})
+                return httpx.Response(200, json={"code": -1, "msg": "library busy"})
+        client2 = httpx.AsyncClient(transport=T2(), base_url="http://unix")
+        monkeypatch.setattr(p, "get_upstream_client", lambda a: client2)
+        code, out = await p._maintenance_scan_manual(guid)
+        assert out["ok"] is False and "library busy" in out["message"]
+        await client2.aclose()
+    finally:
+        await client.aclose()
+        p._admin_token_cache.clear()

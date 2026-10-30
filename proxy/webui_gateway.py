@@ -347,7 +347,11 @@ def handle_maintenance(client: socket.socket, head_raw: bytes, method: str, targ
                            re.fullmatch(ORGANIZE_PATH + r"/[0-9a-fA-F]{32}", target) is not None)))
         # 音乐用户列表只读，走同一条管理员维护通道（GET，无请求体）
         users_route = method == "GET" and target == MAINTENANCE_ROOT + "/music-users"
-        if not (cleanup_route or organize_route or users_route):
+        # 扫库管理员登录测试 / 手动扫库（POST + JSON 体）
+        scan_test_route = method == "POST" and target == MAINTENANCE_ROOT + "/scan-admin-test"
+        scan_manual_route = method == "POST" and target == MAINTENANCE_ROOT + "/scan-manual"
+        if not (cleanup_route or organize_route or users_route
+                or scan_test_route or scan_manual_route):
             client.sendall(_json_response(404, {"ok": False, "error": "未知维护接口"}))
             return
         if "transfer-encoding" in headers:
@@ -372,6 +376,14 @@ def handle_maintenance(client: socket.socket, head_raw: bytes, method: str, targ
                 if req != {"confirm_beta": True} or type(req.get("confirm_beta")) is not bool:
                     raise ValueError("仅允许 confirm_beta: true 确认字段")
                 body = b'{"confirm_beta":true}'
+            elif target in (MAINTENANCE_ROOT + "/scan-admin-test",
+                            MAINTENANCE_ROOT + "/scan-manual"):
+                # 登录测试无体 / 手动扫库仅 guid 字段，原样转发给 proxy 校验
+                if scan_manual_route and (not isinstance(req, dict)
+                                          or set(req) != {"guid"}
+                                          or not isinstance(req.get("guid"), str)):
+                    raise ValueError("手动扫库仅允许 guid 字段")
+                body = json.dumps(req, separators=(",", ":")).encode("utf-8")
             else:
                 if (not isinstance(req, dict) or
                         set(req) != {"confirm_beta", "root", "layout"} or

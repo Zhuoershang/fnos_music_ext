@@ -4751,6 +4751,13 @@ async def _maintenance_request(method: str, path: str, body: dict) -> tuple[int,
         _maintenance_task = asyncio.create_task(run_cleanup_task())
         return 200, {"ok": True, "job": dict(job)}
 
+    if path == "/api/maintenance/scan-admin-test":
+        return await _maintenance_scan_admin_login()
+    if path == "/api/maintenance/scan-manual":
+        guid = str((body or {}).get("guid") or "").strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", guid):
+            return 400, {"ok": False, "error": "共享库 guid 无效"}
+        return await _maintenance_scan_manual(guid.lower())
     if path != "/api/maintenance/organize":
         return 400, {"ok": False, "error": "不支持的维护请求"}
     if (not isinstance(body, dict) or set(body) != {"confirm_beta", "root", "layout"} or
@@ -6325,6 +6332,55 @@ async def _admin_scan_headers(client: httpx.AsyncClient) -> "dict | None":
 
 # 按用户扫库节流：凭据指纹 → (上次触发时间, 在途任务)；凭据指纹与登录态一一对应
 _scan_state_by_user: "dict[str, dict]" = {}
+
+
+async def _maintenance_scan_admin_login() -> tuple[int, dict]:
+    """管理员登录测试：验证账密密文能否换取扫库凭证（userToken）。"""
+    if not _admin_configured():
+        return 400, {"ok": False, "error": "尚未配置扫库管理员密码密文"}
+    client = get_upstream_client(app)
+    token = await _admin_login(client, _admin_password())
+    if not token:
+        return 200, {"ok": False, "error": "登录失败：账密密文无效或服务不可达，未获取到凭证"}
+    _admin_token_cache[_admin_password()] = token
+    who = ""
+    try:
+        req = client.build_request("GET", "/music/api/v1/user/me",
+                                   headers={"cookie": f"music-token={token}"})
+        resp = await client.send(req)
+        data = resp.json() if resp.status_code == 200 else {}
+        user = (data.get("data") or {}).get("user") or {}
+        who = f"{user.get('name') or '?'}（{user.get('role') or '?'}）"
+    except Exception:
+        pass
+    return 200, {"ok": True, "message": f"登录成功，已获取扫库凭证（music-token）{('：' + who) if who else ''}",
+                 "tested_at": time.time()}
+
+
+async def _maintenance_scan_manual(guid: str) -> tuple[int, dict]:
+    """手动触发指定共享库扫描：用管理员登录态（回退触发逻辑同自动扫库）。"""
+    client = get_upstream_client(app)
+    req_headers = await _admin_scan_headers(client) if _admin_configured() else None
+    if not req_headers:
+        return 200, {"ok": False, "error": "管理员登录态不可用：请先配置/测试扫库管理员密码密文",
+                     "tested_at": time.time()}
+    body = json.dumps({"guid": guid}, separators=(",", ":"))
+    path = "/music/api/v1/shared-library/scan"
+    started = time.time()
+    try:
+        req = client.build_request(
+            "POST", path, content=body.encode("utf-8"),
+            headers={**req_headers, "content-type": "application/json"},
+        )
+        resp = await client.send(req)
+        data = resp.json() if resp.status_code == 200 else {}
+        ok = resp.status_code == 200 and isinstance(data, dict) and data.get("code") == 0
+        msg = ("扫描已触发" if ok else
+               f"触发失败：HTTP {resp.status_code} {(data.get('msg') or '')[:120]}".strip())
+        return 200, {"ok": ok, "message": msg, "tested_at": started}
+    except Exception as exc:
+        return 200, {"ok": False, "error": f"触发失败：{type(exc).__name__}",
+                     "tested_at": started}
 
 
 def _scan_bucket(headers: dict | None) -> str:

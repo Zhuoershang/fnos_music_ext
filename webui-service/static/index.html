@@ -319,6 +319,10 @@
           <label class="field"><span>扫库登录设备 ID（选填）</span>
             <input class="input" id="scan-admin-device" placeholder="留空=每次登录随机生成（一般无需填写）">
           </label>
+          <div class="btn-row">
+            <button class="btn" id="scan-admin-test" type="button">登录测试</button>
+            <p class="hint grow" id="scan-admin-test-result" role="status" aria-live="polite"></p>
+          </div>
           <p class="hint">扫库接口需要管理员权限：填写管理员密码密文后，所有扫库（含非管理员用户触发的落盘）统一用管理员登录态执行，token 失效自动重新登录；获取密文：浏览器登录飞牛音乐时按 F12 → Network → 找到 password-login 请求 → 载荷里的 password 字段值。留空时回退用触发者本人的登录态。</p>
           <p class="hint">重扫接口填「接口路径|JSON参数」，如 /music/api/v1/shared-library/scan|{"guid":"你的共享库id"}（guid 可在飞牛音乐网页端手动扫库时按 F12 从请求参数获取）。歌曲落盘后延迟指定秒数（合并连续落盘，0=立即发）自动携带登录态调用（Authx 签名透传，无需额外配置），加速官方入库；冷却窗口内不重复触发；JSON 参数段可省略。留空=官方自动扫描入库。</p>
         </div>

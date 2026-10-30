@@ -44,6 +44,8 @@ def _route(method: str, path: str) -> bool:
             or (method == "GET" and path == "/api/maintenance/music-users")
             or (method == "GET" and re.fullmatch(CLEANUP_PATH + r"/[0-9a-fA-F]{32}", path) is not None)
             or (method == "POST" and path == ORGANIZE_PATH)
+            or (method == "POST" and path == "/api/maintenance/scan-admin-test")
+            or (method == "POST" and path == "/api/maintenance/scan-manual")
             or (method == "GET" and (path == ORGANIZE_PATH or
                 re.fullmatch(ORGANIZE_PATH + r"/[0-9a-fA-F]{32}", path) is not None)))
 
@@ -51,6 +53,14 @@ def _route(method: str, path: str) -> bool:
 def _validate_body(method: str, path: str, body):
     if method == "GET":
         return {}
+    if path == "/api/maintenance/scan-admin-test":
+        return {}
+    if path == "/api/maintenance/scan-manual":
+        if (not isinstance(body, dict) or set(body) != {"guid"}
+                or not isinstance(body.get("guid"), str)
+                or not re.fullmatch(r"[0-9a-fA-F]{32}", body["guid"])):
+            raise ValueError("手动扫库仅允许 32 位 guid 字段")
+        return {"guid": body["guid"]}
     if path == CLEANUP_PATH:
         if body != {"confirm_beta": True} or type(body.get("confirm_beta")) is not bool:
             raise ValueError("Explicit confirmation required")

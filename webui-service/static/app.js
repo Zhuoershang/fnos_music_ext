@@ -1048,11 +1048,14 @@ function renderScanByUser() {
   list.innerHTML = guids.size
     ? [...guids].sort().map((guid) => {
         const value = scanByUserMap[guid] ?? "";
-        return `<label class="field"><span>${escapeHtml(scanByUserLabel(guid))}</span>
+        return `<div class="field"><div class="btn-row"><span class="grow">${escapeHtml(scanByUserLabel(guid))}</span>
+          <button class="btn scan-by-user-run" type="button" data-guid="${escapeHtml(guid)}"
+                  title="用当前填写的扫库接口手动触发一次扫描">手动扫库</button></div>
           <input class="input scan-by-user-input" data-guid="${escapeHtml(guid)}"
                  value="${escapeHtml(value)}"
                  placeholder="留空=用全局曲库重扫接口；全局也为空=该用户不触发扫库">
-        </label>`;
+          <p class="hint scan-by-user-result" data-guid="${escapeHtml(guid)}" hidden></p>
+        </div>`;
       }).join("")
     : '<p class="hint">尚未读取到飞牛音乐用户，点击「刷新用户」加载。</p>';
   list.querySelectorAll(".scan-by-user-input").forEach((input) => {
@@ -1065,7 +1068,68 @@ function renderScanByUser() {
       markDirty("按用户扫库配置已修改");
     });
   });
+  list.querySelectorAll(".scan-by-user-run").forEach((btn) => {
+    btn.addEventListener("click", () => runManualScan(btn.dataset.guid, btn));
+  });
 }
+
+async function scanGuidOfInput(guid) {
+  // 优先取该用户行内当前输入（含未保存的编辑），回落全局接口里的 guid
+  const input = document.querySelector(`.scan-by-user-input[data-guid="${CSS.escape(guid)}"]`);
+  const raw = (input ? input.value.trim() : "") || $("#scan-path").value.trim();
+  const m = raw.match(/"guid"\s*:\s*"([0-9a-fA-F]{32})"/);
+  return m ? m[1] : "";
+}
+
+async function runManualScan(guid, btn) {
+  const resultEl = document.querySelector(`.scan-by-user-result[data-guid="${CSS.escape(guid)}"]`);
+  const show = (text) => {
+    if (!resultEl) return;
+    resultEl.hidden = false;
+    resultEl.textContent = text;
+  };
+  const scanGuid = await scanGuidOfInput(guid);
+  if (!scanGuid) {
+    show("✕ 未找到扫库参数：请先在该用户行或全局接口填入含 guid 的 JSON 参数");
+    return;
+  }
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = "扫描中…";
+  show("正在触发扫描…");
+  try {
+    const res = await api("/api/maintenance/scan-manual", { method: "POST", body: { guid: scanGuid } });
+    const when = new Date(res.tested_at ? res.tested_at * 1000 : Date.now()).toLocaleTimeString();
+    show((res.ok ? "✓ " : "✕ ") + (res.message || res.error || "未知结果") + `（${when}）`);
+  } catch (exc) {
+    show("✕ 请求失败：" + exc.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+async function testScanAdminLogin() {
+  const btn = $("#scan-admin-test");
+  const out = $("#scan-admin-test-result");
+  btn.disabled = true;
+  out.textContent = "正在登录测试…";
+  try {
+    // 测试的是「保存后的」账密：若有未保存修改，先自动保存再测
+    if (dirty) {
+      await saveConfig();
+    }
+    const res = await api("/api/maintenance/scan-admin-test", { method: "POST", body: {} });
+    const when = new Date(res.tested_at ? res.tested_at * 1000 : Date.now()).toLocaleTimeString();
+    out.textContent = ((res.ok ? "✓ " : "✕ ") + (res.message || res.error || "未知结果") + `（${when}）`);
+  } catch (exc) {
+    out.textContent = "✕ 请求失败：" + exc.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("#scan-admin-test").addEventListener("click", testScanAdminLogin);
 
 $("#scan-by-user-retry").addEventListener("click", async () => {
   await loadMusicUsers();
