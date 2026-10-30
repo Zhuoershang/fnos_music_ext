@@ -186,9 +186,9 @@ async def test_promote_dedup_concurrent_schedules(monkeypatch):
     installs = []
     real_install = p._install_library_audio
 
-    def counting_install(*args):
+    def counting_install(*args, **kwargs):
         installs.append(args[1])
-        return real_install(*args)
+        return real_install(*args, **kwargs)
 
     monkeypatch.setattr(p, "_install_library_audio", counting_install)
     _record_dispatch(monkeypatch)

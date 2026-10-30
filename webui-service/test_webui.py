@@ -2785,3 +2785,39 @@ def test_scan_timing_ui_bindings():
     assert 'FNMUSIC_SCAN_DELAY_S: parseFloat($("#scan-delay").value)' in js
     assert 'FNMUSIC_SCAN_COOLDOWN_S: parseFloat($("#scan-cooldown").value)' in js
     assert "updateScanLabels" in js
+
+
+# ------------------------------------ 按用户落盘/扫库（2.11.12 webui） ----
+
+def test_scan_by_user_save_validates_and_writes(env_file):
+    """保存即整体覆盖，值经校验归一化；显式空串=禁用该用户扫库。"""
+    webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps(
+        {"u1": "/u1/scan|{\"guid\":\"g1\"}", "u2": "/u2/scan"})})
+    stored = json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"])
+    assert stored == {"u1": "/u1/scan|{\"guid\":\"g1\"}", "u2": "/u2/scan"}
+    webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps({"u1": ""})})
+    assert json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"]) == {"u1": ""}
+
+
+@pytest.mark.parametrize("value", ['[]', '{"u1":"nopath"}', '{"u1":"/x|not-json"}', '{"":"/x"}'])
+def test_invalid_scan_by_user_mapping(value):
+    with pytest.raises(ValueError):
+        webui._validate_scan_by_user(value)
+
+
+def test_scan_by_user_schema():
+    assert webui.SCHEMA["FNMUSIC_LIBRARY_SCAN_BY_USER"]["group"] == "tee"
+    assert webui.SCHEMA["FNMUSIC_TEE_SAVE_BY_USER"]["group"] == "storage"
+
+
+def test_by_user_ui_bindings():
+    """按用户开关与扫库面板存在且读写接线齐全。"""
+    html = open("webui-service/static/index.html", encoding="utf-8").read()
+    js = open("webui-service/static/app.js", encoding="utf-8").read()
+    assert 'id="tee-save-by-user"' in html and 'id="scan-by-user-panel"' in html
+    assert 'id="scan-by-user-list"' in html and 'id="scan-by-user-retry"' in html
+    assert 'FNMUSIC_TEE_SAVE_BY_USER: $("#tee-save-by-user").checked' in js
+    assert "renderScanByUser" in js and "scanByUserChanges" in js
+    assert "FNMUSIC_LIBRARY_SCAN_BY_USER" in js
+    # 扫库独立卡片
+    assert 'data-help="library-scan"' in html

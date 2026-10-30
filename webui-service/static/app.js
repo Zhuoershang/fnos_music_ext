@@ -36,6 +36,8 @@ let publicUsersSeq = 0;
 let publicUserGuid = "";
 let publicSelectionMap = {};
 const publicUserChanges = new Set();
+let scanByUserMap = {};
+const scanByUserChanges = new Set();
 let publicCapabilities = null;
 let publicState = {
   provider: "musicbox", channel: "charts", source: "netease", category: "", sort: "",
@@ -609,6 +611,15 @@ function applyConfigToForm() {
   $("#bind-timeout").value = v.FNMUSIC_OFFICIAL_BIND_TIMEOUT_S || "120";
   $("#handoff-max").value = v.FNMUSIC_TEE_HANDOFF_MAX != null ? v.FNMUSIC_TEE_HANDOFF_MAX : "3";
   $("#scan-path").value = v.FNMUSIC_LIBRARY_SCAN_PATH || "";
+  {
+    let parsed = {};
+    try {
+      parsed = JSON.parse(v.FNMUSIC_LIBRARY_SCAN_BY_USER || "{}");
+    } catch (_) { parsed = {}; }
+    scanByUserMap = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  }
+  scanByUserChanges.clear();
+  $("#tee-save-by-user").checked = v.FNMUSIC_TEE_SAVE_BY_USER === "true";
   $("#scan-delay").value = v.FNMUSIC_SCAN_DELAY_S ?? "3";
   $("#scan-cooldown").value = v.FNMUSIC_SCAN_COOLDOWN_S ?? "90";
   updateScanLabels();
@@ -685,6 +696,7 @@ function collectConfig() {
     FNMUSIC_OFFICIAL_BIND_TIMEOUT_S: parseInt($("#bind-timeout").value || "120", 10) || 120,
     FNMUSIC_TEE_HANDOFF_MAX: parseInt($("#handoff-max").value || "3", 10) || 0,
     FNMUSIC_LIBRARY_SCAN_PATH: $("#scan-path").value.trim(),
+    FNMUSIC_TEE_SAVE_BY_USER: $("#tee-save-by-user").checked,
     FNMUSIC_SCAN_DELAY_S: parseFloat($("#scan-delay").value) || 0,
     FNMUSIC_SCAN_COOLDOWN_S: parseFloat($("#scan-cooldown").value) || 0,
     FNMUSIC_LLM_BASE_URL: $("#llm-base").value.trim(),
@@ -727,6 +739,13 @@ function collectConfig() {
     values.FNMUSIC_PUBLIC_PLAYLISTS_SELECTION = JSON.stringify(
       publicSelection.map(({ provider, source, kind, id }) => ({ provider, source, kind, id }))
     );
+  }
+  if (configSchema.FNMUSIC_LIBRARY_SCAN_BY_USER && scanByUserChanges.size) {
+    const scanChanges = {};
+    for (const guid of scanByUserChanges) {
+      scanChanges[guid] = String(scanByUserMap[guid] ?? "").trim();
+    }
+    values.FNMUSIC_LIBRARY_SCAN_BY_USER = JSON.stringify(scanChanges);
   }
   const dlDir = values.FNMUSIC_TEE_SAVE_DIR;
   const cacheDir = values.FNMUSIC_CACHE_DIR;
@@ -981,6 +1000,7 @@ async function loadMusicUsers() {
     if (seq === publicUsersSeq) {
       $("#public-users-retry").disabled = false;
       renderMusicUsers();
+      renderScanByUser();
       renderPublicSelected();
       updateResidentAvailability();
     }
@@ -1003,6 +1023,47 @@ $("#public-user").addEventListener("change", () => selectPublicUser($("#public-u
 $("#public-users-retry").addEventListener("click", async () => {
   await loadMusicUsers();
   if (publicUsersReady && publicUserGuid) await showPublicBrowser();
+});
+
+/* ------------------------------------------------------ 按用户扫库配置 ---- */
+function scanByUserLabel(guid) {
+  const user = publicUsers.find((u) => u.guid === guid);
+  return user ? `${user.name || guid}${user.role === "admin" ? "（管理员）" : ""}` : guid;
+}
+
+function renderScanByUser() {
+  const panel = $("#scan-by-user-panel");
+  if (!panel) return;
+  const enabled = !!configSchema.FNMUSIC_LIBRARY_SCAN_BY_USER;
+  panel.hidden = !enabled;
+  if (!enabled) return;
+  const guids = new Set([...Object.keys(scanByUserMap), ...publicUsers.map((u) => u.guid)]);
+  const list = $("#scan-by-user-list");
+  list.innerHTML = guids.size
+    ? [...guids].sort().map((guid) => {
+        const value = scanByUserMap[guid] ?? "";
+        return `<label class="field"><span>${escapeHtml(scanByUserLabel(guid))}</span>
+          <input class="input scan-by-user-input" data-guid="${escapeHtml(guid)}"
+                 value="${escapeHtml(value)}"
+                 placeholder="留空=用全局曲库重扫接口；全局也为空=该用户不触发扫库">
+        </label>`;
+      }).join("")
+    : '<p class="hint">尚未读取到飞牛音乐用户，点击「刷新用户」加载。</p>';
+  list.querySelectorAll(".scan-by-user-input").forEach((input) => {
+    input.addEventListener("input", () => {
+      const guid = input.dataset.guid;
+      const text = input.value.trim();
+      if ((scanByUserMap[guid] ?? "") === text) return;
+      scanByUserMap[guid] = text;
+      scanByUserChanges.add(guid);
+      markDirty("按用户扫库配置已修改");
+    });
+  });
+}
+
+$("#scan-by-user-retry").addEventListener("click", async () => {
+  await loadMusicUsers();
+  renderScanByUser();
 });
 
 function anyPublicMusicboxSelection() {
@@ -2297,6 +2358,11 @@ const DIR_FIELDS = [
 ];
 $("#download-layout").addEventListener("change", () => {
   markDirty("存放方式需保存后生效；已有歌曲可稍后点击「整理」调整");
+});
+$("#tee-save-by-user").addEventListener("change", () => {
+  markDirty($("#tee-save-by-user").checked
+    ? "按用户分目录已开启：新落盘歌曲将写入「下载目录/用户名/」，已有文件不迁移"
+    : "按用户分目录已关闭：新落盘歌曲回到下载目录根部");
 });
 let _fsCheckSeq = 0;                // 防抖竞态：只采纳最后一次输入的校验结果
 const _authorizedDirs = new Set();  // authorizeUserFile 每个路径只尝试一次，避免重复弹授权框

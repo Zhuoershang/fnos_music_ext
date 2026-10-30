@@ -340,7 +340,7 @@ async def test_resume_part_download_appends_and_finalizes(tmp_path, monkeypatch)
 
     monkeypatch.setattr(appmod, "_open_online_stream", fake_open)
 
-    def fake_finalize(part_, guid, ext, info, tee_enabled):
+    def fake_finalize(part_, guid, ext, info, tee_enabled, retained=None, already_verified=False, user_guid=""):
         calls["finalize"] = (guid, ext, tee_enabled)
         return {"dest": part_, "title": info["title"], "artist": info["artist"], "album": ""}
 

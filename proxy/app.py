@@ -224,6 +224,12 @@ CONF = {
     "scan_delay_s": _safe_scan_number(os.environ.get("FNMUSIC_SCAN_DELAY_S", "3"), 3.0, 0.0, 600.0),
     # 扫库冷却窗口（秒）：触发一次后 N 秒内不再触发（成功失败都算），0=仅合并窗口兜底
     "scan_cooldown_s": _safe_scan_number(os.environ.get("FNMUSIC_SCAN_COOLDOWN_S", "90"), 90.0, 0.0, 3600.0),
+    # 按用户分下载目录（默认关）：开=新落盘歌曲写 <下载目录>/<飞牛音乐用户名>/；
+    # 已有文件不迁移；重名用户目录合并。开启时落盘强制走「先缓存后转存」
+    "tee_save_by_user": os.environ.get("FNMUSIC_TEE_SAVE_BY_USER", "false").lower() in ("true", "1", "yes"),
+    # 每用户扫库接口：JSON {"<user_guid>": "路径|JSON体"}；键不存在回落全局
+    # library_scan_path，键存在且值为空串=该用户显式禁用扫库
+    "library_scan_by_user": (os.environ.get("FNMUSIC_LIBRARY_SCAN_BY_USER", "") or "").strip(),
     "merge_suggest": os.environ.get("FNMUSIC_MERGE_SUGGEST", "false").lower() in ("true", "1", "yes"),
     "online_sources": os.environ.get("FNMUSIC_ONLINE_SOURCES", "KuwoMusicClient,MiguMusicClient"),
     # lx 平台白名单（同 .env 的 LX_SOURCES；install.sh --sources lx-<平台> 写入）；
@@ -621,6 +627,8 @@ _ENV_WATCH_KEYS: dict[str, tuple[str, str]] = {
     "FNMUSIC_LIBRARY_SCAN_PATH": ("library_scan_path", "str"),
     "FNMUSIC_SCAN_DELAY_S": ("scan_delay_s", "scan_number"),
     "FNMUSIC_SCAN_COOLDOWN_S": ("scan_cooldown_s", "scan_number"),
+    "FNMUSIC_TEE_SAVE_BY_USER": ("tee_save_by_user", "bool"),
+    "FNMUSIC_LIBRARY_SCAN_BY_USER": ("library_scan_by_user", "str"),
     "FNMUSIC_RECOMMEND_HOT": ("recommend_hot", "bool"),
     "FNMUSIC_RECOMMEND_DAILY": ("recommend_daily", "bool"),
     "FNMUSIC_PUBLIC_PLAYLISTS_ENABLED": ("public_playlists_enabled", "bool"),
@@ -845,9 +853,9 @@ def _apply_env_hot_reload(env_path: "str | None" = None) -> list[str]:
             changed.append(env_key)
     if "cache_dir" in changed:
         _migrate_media_refs(old_cache_dir or "", CONF["cache_dir"])
-    if set(changed) & {"tee_save_mode", "cache_dir", "tee_save_dir"}:
-        # 落盘方式/目标目录/缓存目录任一变化，此前的 staged 判定全部作废，
-        # 不清空的话旧判定会一直复用到重启
+    if set(changed) & {"tee_save_mode", "cache_dir", "tee_save_dir", "tee_save_by_user"}:
+        # 落盘方式/目标目录/缓存目录/按用户分目录任一变化，此前的 staged 判定
+        # 全部作废，不清空的话旧判定会一直复用到重启
         _TEE_STAGED_CACHE.clear()
     if set(changed) & {"quality_mode", "netease_quality"}:
         _sync_netease_quality()
@@ -2359,27 +2367,47 @@ def detect_library_dir() -> str:
 _TEE_SAVE_DIR_WARNED = False
 
 
-def tee_save_dir() -> str:
-    """边听边存落盘目录：配置路径可用则用，否则回退自动探测的曲库目录。"""
+def tee_save_dir(user_guid: str = "") -> str:
+    """边听边存落盘目录：配置路径可用则用，否则回退自动探测的曲库目录。
+
+    user_guid 非空且 FNMUSIC_TEE_SAVE_BY_USER 开启时，返回
+    <root>/<飞牛音乐用户名>/（子目录创建失败回退根目录，不阻塞落盘）。
+    无参调用行为与按用户开关开启前完全一致。
+    """
     explicit = str(CONF.get("tee_save_dir") or "").strip()
     if not explicit:
-        return detect_library_dir()
-    usable = False
-    try:
-        os.makedirs(explicit, exist_ok=True)
-        usable = os.path.isdir(explicit) and os.access(explicit, os.W_OK)
-    except Exception:
+        root = detect_library_dir()
+    else:
         usable = False
-    if usable:
-        return explicit
-    global _TEE_SAVE_DIR_WARNED
-    if not _TEE_SAVE_DIR_WARNED:
-        _TEE_SAVE_DIR_WARNED = True
-        logger.warning(
-            "FNMUSIC_TEE_SAVE_DIR=%s 不可用（无法创建或不可写），边听边存回退到 %s",
-            explicit, detect_library_dir(),
-        )
-    return detect_library_dir()
+        try:
+            os.makedirs(explicit, exist_ok=True)
+            usable = os.path.isdir(explicit) and os.access(explicit, os.W_OK)
+        except Exception:
+            usable = False
+        if usable:
+            root = explicit
+        else:
+            global _TEE_SAVE_DIR_WARNED
+            if not _TEE_SAVE_DIR_WARNED:
+                _TEE_SAVE_DIR_WARNED = True
+                logger.warning(
+                    "FNMUSIC_TEE_SAVE_DIR=%s 不可用（无法创建或不可写），边听边存回退到 %s",
+                    explicit, detect_library_dir(),
+                )
+            root = detect_library_dir()
+    if not user_guid or not root or not CONF.get("tee_save_by_user"):
+        return root
+    try:
+        sub = os.path.join(root, music_user_name(user_guid))
+        if sub == root or os.path.basename(sub) == "shared":
+            # shared=身份未知：落根目录（与按用户开关关闭时一致）
+            return root
+        os.makedirs(sub, exist_ok=True)
+        if os.path.isdir(sub) and os.access(sub, os.W_OK):
+            return sub
+    except Exception as exc:
+        logger.info("per-user tee dir failed for %s: %s", user_guid, type(exc).__name__)
+    return root
 
 
 def iter_media_dirs() -> list[str]:
@@ -4570,6 +4598,38 @@ def list_music_users(db_path: str = "") -> list[dict]:
     return users
 
 
+_MUSIC_USER_NAME_TTL_S = 300.0
+_music_user_names: "dict[str, str]" = {}
+_music_user_names_at = 0.0
+
+
+def music_user_name(user_guid: str) -> str:
+    """guid → 飞牛音乐用户名（落盘子目录用），5 分钟缓存；失败回退 guid。
+
+    官方 user 表 guid 是唯一键、昵称可重复：重名用户落盘目录会合并，属
+    已确认的取舍。用户名保留 Unicode 文字（中文等），仅替换路径非法字符。
+    """
+    global _music_user_names, _music_user_names_at
+    guid = str(user_guid or "").strip()
+    if not guid or guid == "shared":
+        return "shared"
+    now = time.monotonic()
+    if not _music_user_names or now - _music_user_names_at > _MUSIC_USER_NAME_TTL_S:
+        try:
+            _music_user_names = {
+                u["guid"]: str(u.get("name") or "").strip() or u["guid"]
+                for u in list_music_users()
+            }
+            _music_user_names_at = now
+        except Exception as exc:
+            logger.info("music user name lookup failed: %s", type(exc).__name__)
+    name = _music_user_names.get(guid)
+    if not name:
+        return guid
+    safe = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", name).strip().strip(".")
+    return safe or guid
+
+
 def migrate_public_playlist_users(users: list[dict] | None = None) -> None:
     path = _env_watch_path()
     if not os.path.isfile(path):
@@ -5845,9 +5905,11 @@ def _install_library_audio_staged(part: str, guid: str, ext: str, title: str,
 
 
 def _install_library_audio(part: str, guid: str, ext: str, title: str, artist: str,
-                           album: str, src: dict) -> "tuple[str, bool]":
+                           album: str, src: dict, user_guid: str = "") -> "tuple[str, bool]":
     """把已校验完整的音频转正进曲库：定名/落位/权限/标签/封面/影子歌词随迁。
 
+    user_guid 非空且按用户分目录开启时：dest 落 <dir>/<用户名>/，并强制 staged
+    （调用方保证 part 已在本地暂存区；此处只对用户目录做单次写入）。
     目标文件已存在（同 guid 重复落盘或同曲跨 guid，issue #52）一律复用已有文件：
     丢弃本次字节绝不覆盖（用户自有文件与已有标签都不动），只刷新 guid 引用让
     后续播放命中本地。跨文件系统（缓存目录与曲库不同挂载点）退化为复制+删除。
@@ -5855,7 +5917,8 @@ def _install_library_audio(part: str, guid: str, ext: str, title: str, artist: s
     落点带离配置目录时会错配）。返回 (dest, reused)。
     """
     with _LIBRARY_FILE_LOCK:
-        dest = library_media_path(guid, title, ext, artist=artist, album=album, directory=tee_save_dir())
+        dest = library_media_path(guid, title, ext, artist=artist, album=album,
+                                  directory=tee_save_dir(user_guid))
         reused = os.path.exists(dest)
         if reused:
             # 复用判定先行（双模式共用）：不做标签改写、不下载封面——
@@ -5867,7 +5930,7 @@ def _install_library_audio(part: str, guid: str, ext: str, title: str, artist: s
             if CONF.get("lyric_auto_dl"):
                 promote_shadow_lyric(guid, dest)
             return dest, reused
-        if _staged_decision(os.path.dirname(dest) or "."):
+        if user_guid or _staged_decision(os.path.dirname(dest) or "."):
             return _install_library_audio_staged(
                 part, guid, ext, title, artist, album, src, dest
             )
@@ -5899,7 +5962,8 @@ def _install_library_audio(part: str, guid: str, ext: str, title: str, artist: s
 
 
 def _tee_finalize(part: str, guid: str, ext: str, info: dict | None, tee_enabled: bool,
-                  retained: dict | None = None, already_verified: bool = False) -> dict | None:
+                  retained: dict | None = None, already_verified: bool = False,
+                  user_guid: str = "") -> dict | None:
     """落盘转正：边听边存开→进曲库（定名/权限/标签，歌词仅在 FNMUSIC_LYRIC_AUTO_DL
     开启时随迁），关→进滚动缓存（不写歌词）。
 
@@ -5953,7 +6017,8 @@ def _tee_finalize(part: str, guid: str, ext: str, info: dict | None, tee_enabled
             )
             return {"dest": dest, "title": title, "artist": artist, "album": album, "deferred": True}
         try:
-            dest, reused = _install_library_audio(part, guid, ext, title, artist, album, src)
+            dest, reused = _install_library_audio(part, guid, ext, title, artist, album, src,
+                                                  user_guid=user_guid)
         except _StagedSaveError:
             # 保留可播放、可由 deferred promotion 重试入库的缓存；失败不触发
             # 歌词下载、曲库扫描或官方绑定，后台下载调用方仍按失败计。
@@ -6030,7 +6095,8 @@ async def _promote_deferred_cache(headers: dict, guid: str, cached: str,
             return
         ext = os.path.splitext(cached)[1].lstrip(".").lower() or "mp3"
         dest, _reused = await asyncio.to_thread(
-            _install_library_audio, cached, guid, ext, title, artist, album, src)
+            _install_library_audio, cached, guid, ext, title, artist, album, src,
+            user_guid=await _user_guid_from_headers(headers))
         meta = {"dest": dest, "title": title, "artist": artist, "album": album}
         await _auto_lyric_after_finalize(_synth_request(headers), guid, meta)
         _schedule_library_scan(headers)
@@ -6071,7 +6137,8 @@ async def _promote_rolling_cache(guid: str, headers: "dict | None",
             return
         ext = os.path.splitext(cached)[1].lstrip(".").lower() or "mp3"
         dest, _reused = await asyncio.to_thread(
-            _install_library_audio, cached, guid, ext, title, artist, album, src)
+            _install_library_audio, cached, guid, ext, title, artist, album, src,
+            user_guid=await _user_guid_from_headers(headers))
         meta = {"dest": dest, "title": title, "artist": artist, "album": album}
         await _auto_lyric_after_finalize(_synth_request(headers or {}), guid, meta)
         _schedule_library_scan(headers)
@@ -6128,12 +6195,9 @@ _scan_last_attempt = 0.0
 _scan_task: "asyncio.Task | None" = None
 
 
-def _scan_config() -> "tuple[str, str]":
-    """解析重扫配置「路径|JSON体」：竖线分隔，JSON 段可选（兼容旧纯路径格式）。
-
-    返回 (path, body)；body 为空串表示无请求体。
-    """
-    raw = str(CONF.get("library_scan_path") or "").strip()
+def _parse_scan_raw(raw: str) -> "tuple[str, str]":
+    """解析「路径|JSON体」：竖线分隔，JSON 段可选（兼容旧纯路径格式）。"""
+    raw = str(raw or "").strip()
     if not raw:
         return "", ""
     if "|" in raw:
@@ -6142,32 +6206,97 @@ def _scan_config() -> "tuple[str, str]":
     return raw, ""
 
 
+def _scan_config(user_guid: str = "") -> "tuple[str, str]":
+    """重扫配置：该用户在 FNMUSIC_LIBRARY_SCAN_BY_USER 有条目则用它，否则回落全局。
+
+    条目键存在但值为空 = 该用户显式禁用扫库（不回落全局）。
+    返回 (path, body)；body 为空串表示无请求体。
+    """
+    if user_guid:
+        try:
+            mapping = json.loads(str(CONF.get("library_scan_by_user") or "{}"))
+            if isinstance(mapping, dict) and user_guid in mapping:
+                return _parse_scan_raw(mapping.get(user_guid))
+        except ValueError:
+            pass
+    return _parse_scan_raw(CONF.get("library_scan_path"))
+
+
+# 按用户扫库节流：凭据指纹 → (上次触发时间, 在途任务)；凭据指纹与登录态一一对应
+_scan_state_by_user: "dict[str, dict]" = {}
+
+
+def _scan_bucket(headers: dict | None) -> str:
+    """扫库分桶键：按用户落盘/扫库任一启用时按凭据指纹分桶，否则全局单桶。
+
+    凭据指纹是零开销哈希（不发网络请求）；真实 user guid 在任务内解析一次，
+    用于选该用户的扫库路径。
+    """
+    if not headers:
+        return ""
+    if not (CONF.get("tee_save_by_user")
+            or str(CONF.get("library_scan_by_user") or "").strip()):
+        return ""
+    try:
+        return _credential_scope(_synth_request(headers))
+    except Exception:
+        return ""
+
+
 def _schedule_library_scan(headers: dict | None) -> None:
-    """落盘进曲库后通知官方重扫（FNMUSIC_LIBRARY_SCAN_PATH 为空=禁用）。
+    """落盘进曲库后通知官方重扫（全局路径与用户条目均空=禁用）。
 
     官方扫描接口无公开资料：配置「路径|JSON体」（如
     /music/api/v1/shared-library/scan|{"guid":"..."}），JSON 段可选；
     3 秒合并窗口（连续落盘多首只发一次）+ 90 秒 TTL（成功与失败都节流，
     路径配错不会风暴）。凭证头取自触发请求（copy_incoming_headers，含
     Authx 新鲜签名原样透传），只在任务内一次性使用，不落盘。
+
+    FNMUSIC_LIBRARY_SCAN_BY_USER（{"<guid>": "路径|JSON体"}）按用户配置各自
+    的扫库接口（如各自共享库的 guid）；登录态始终取自触发请求本身——谁落盘
+    谁触发，天然用对登录态。冷却与合并任务按凭据指纹分桶隔离，互不挤占。
     """
     global _scan_task, _scan_last_attempt
-    if not str(CONF.get("library_scan_path") or "").strip() or not headers:
+    if not headers:
         return
-    if time.monotonic() - _scan_last_attempt < float(CONF.get("scan_cooldown_s") or _SCAN_TTL_S):
+    bucket = _scan_bucket(headers)
+    if bucket:
+        state = _scan_state_by_user.setdefault(
+            bucket, {"last": 0.0, "task": None})
+        last, task = state["last"], state["task"]
+    else:
+        last, task = _scan_last_attempt, _scan_task
+    # 全局路径与按用户配置都未配置 = 扫库禁用
+    if not str(CONF.get("library_scan_path") or "").strip() \
+            and not str(CONF.get("library_scan_by_user") or "").strip():
         return
-    if _scan_task is not None and not _scan_task.done():
+    if time.monotonic() - last < float(CONF.get("scan_cooldown_s") or _SCAN_TTL_S):
+        return
+    if task is not None and not task.done():
         return
 
     async def _run() -> None:
-        global _scan_last_attempt
+        nonlocal bucket
         delay = max(float(CONF.get("scan_delay_s") or 0.0), 0.0)
         if delay > 0:
             await asyncio.sleep(delay)
-        scan_path, scan_body = _scan_config()
+        # 任务内解析真实用户 guid（凭据指纹桶 → guid），选该用户的扫库路径；
+        # 解析失败用空 guid = 全局路径
+        user_guid = ""
+        if bucket and str(CONF.get("library_scan_by_user") or "").strip():
+            try:
+                _, user_guid, _ = await _probe_upstream_auth(
+                    _synth_request(headers), get_upstream_client(app))
+            except Exception as exc:
+                logger.info("scan user resolve failed: %s", type(exc).__name__)
+        scan_path, scan_body = _scan_config(user_guid)
         if not scan_path:
             return
-        _scan_last_attempt = time.monotonic()
+        if bucket and bucket in _scan_state_by_user:
+            _scan_state_by_user[bucket]["last"] = time.monotonic()
+        else:
+            global _scan_last_attempt
+            _scan_last_attempt = time.monotonic()
         try:
             client = get_upstream_client(app)
             req_headers = dict(headers)
@@ -6179,16 +6308,22 @@ def _schedule_library_scan(headers: dict | None) -> None:
             )
             resp = await client.send(req)
             if resp.status_code == 200:
-                logger.info("Library scan triggered via %s", scan_path)
+                logger.info("Library scan triggered via %s (user=%s)",
+                            scan_path, user_guid or "shared")
             else:
                 logger.warning(
-                    "Library scan %s returned %s (check FNMUSIC_LIBRARY_SCAN_PATH)",
-                    scan_path, resp.status_code,
+                    "Library scan %s returned %s (user=%s; check "
+                    "FNMUSIC_LIBRARY_SCAN_PATH/BY_USER)",
+                    scan_path, resp.status_code, user_guid or "shared",
                 )
         except Exception as e:
             logger.warning("Library scan trigger failed: %s", e)
 
-    _scan_task = asyncio.create_task(_run())
+    new_task = asyncio.create_task(_run())
+    if bucket:
+        _scan_state_by_user[bucket]["task"] = new_task
+    else:
+        _scan_task = new_task
 
 
 def stream_tee_response(
@@ -6257,9 +6392,14 @@ def stream_tee_response(
 
         try:
             tee_enabled = bool(CONF.get("tee_save_enabled"))
+            # 按用户分目录：转正前解析一次落盘所属用户（播放请求头快照）；
+            # 解析出的用户同时决定 .part 落本地暂存区（staged 强制）与最终用户目录
+            tee_user_guid = (await _user_guid_from_headers(scan_headers_factory())
+                             if scan_headers_factory is not None else "")
             if should_cache(range_header) and full_resource:
                 try:
-                    directory = ((staged_dir() if use_staged_save() else tee_save_dir())
+                    directory = ((staged_dir() if (use_staged_save() or tee_user_guid)
+                                  else tee_save_dir())
                                  if tee_enabled else CONF["cache_dir"])
                     os.makedirs(directory, exist_ok=True)
                     part = os.path.join(directory, f"{cache_safe_guid(guid)}.{uuid4().hex}.part")
@@ -6355,7 +6495,8 @@ def stream_tee_response(
                         # 播放期间已收藏/加歌单的 guid 按入库语义 finalize（issue #82）：
                         # 边听边存关闭时也直接进曲库，否则收藏意图无人调度只能空等超时
                         tee_effective = tee_enabled or bool(_bind_pending.get(guid))
-                        meta = await asyncio.to_thread(_tee_finalize, to_finalize, guid, ext, info, tee_effective, retained)
+                        meta = await asyncio.to_thread(_tee_finalize, to_finalize, guid, ext, info,
+                                                       tee_effective, retained, False, tee_user_guid)
                         if not meta:
                             retry_corrupt_tee = tee_effective and _lossless_is_blacklisted(guid)
                         else:
@@ -7130,6 +7271,7 @@ async def _full_fetch_download(guid: str, cred_headers: dict, force_mp3: bool = 
     part = None
     resp = None
     owned = None
+    user_guid = await _user_guid_from_headers(cred_headers)
     try:
         # 合成最小 Request scope（触发请求的凭证头 + app 实例），完整复用在线取
         # 流的解析/元数据/首字节校验逻辑；Range 传 None 保证拿到完整资源。
@@ -7189,7 +7331,8 @@ async def _full_fetch_download(guid: str, cred_headers: dict, force_mp3: bool = 
                     # 本次按失败计，等待下次触发重新下载校验。
                     part = None
                 raise RuntimeError("corrupt stream even at mp3 tier" if force_mp3 else f"decode check failed: {reason}")
-        meta = await asyncio.to_thread(_tee_finalize, part, guid, ext, info or {}, True, already_verified=True)
+        meta = await asyncio.to_thread(_tee_finalize, part, guid, ext, info or {}, True,
+                                       None, True, user_guid)
         part = None
         if not meta:
             logger.warning("Background full fetch finalize rejected for %s", guid)
@@ -7298,8 +7441,10 @@ def _register_tee_handoff(guid: str, part: str, written: int, expected: int | No
 async def _tee_handoff_download(guid: str, part: str, written: int, expected: int | None,
                                 ext: str | None, cred_headers: dict) -> None:
     """续传被中断的 tee 下载；源不支持断点续传或长度不符时回退整轨重下。"""
+    user_guid = await _user_guid_from_headers(cred_headers)
     try:
-        resumed = await _resume_part_download(guid, part, written, expected, ext, cred_headers)
+        resumed = await _resume_part_download(guid, part, written, expected, ext, cred_headers,
+                                              user_guid=user_guid)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -7314,7 +7459,8 @@ async def _tee_handoff_download(guid: str, part: str, written: int, expected: in
 
 
 async def _resume_part_download(guid: str, part: str, written: int, expected: int | None,
-                                ext: str | None, cred_headers: dict) -> bool:
+                                ext: str | None, cred_headers: dict,
+                                user_guid: str = "") -> bool:
     """Range 断点续拉剩余字节追加进 part；不可续传返回 False（调用方回退整轨重下）。"""
     fake_request = _synth_request(cred_headers)
     opened = await _open_online_stream(fake_request, guid, f"bytes={written}-")
@@ -7347,7 +7493,8 @@ async def _resume_part_download(guid: str, part: str, written: int, expected: in
             raise RuntimeError(f"resume size mismatch final={final_size} total={total}")
         info = await _info_for_background_save(fake_request, guid, info)
         resolved_ext = ext or stream_ext or (info or {}).get("ext") or "mp3"
-        meta = await asyncio.to_thread(_tee_finalize, part, guid, resolved_ext, info or {}, True)
+        meta = await asyncio.to_thread(_tee_finalize, part, guid, resolved_ext, info or {}, True,
+                                       None, False, user_guid)
         if not meta:
             logger.warning("Tee handoff resume rejected for %s", guid)
             return False
@@ -9764,6 +9911,19 @@ def build_favorite_track_obj(
         merged.update(obj)
         return merged
     return obj
+
+
+async def _user_guid_from_headers(headers: dict | None) -> str:
+    """从请求头快照解析落盘所属用户（按用户分目录开启时才探测，零开销门禁）。"""
+    if not headers or not CONF.get("tee_save_by_user"):
+        return ""
+    try:
+        _, user_guid, _ = await _probe_upstream_auth(
+            _synth_request(headers), get_upstream_client(app))
+        return user_guid or ""
+    except Exception as exc:
+        logger.info("user guid from headers failed: %s", type(exc).__name__)
+        return ""
 
 
 async def _probe_upstream_auth(request: Request, client: httpx.AsyncClient) -> tuple[bool, str, Response | None]:
