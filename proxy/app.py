@@ -9855,7 +9855,8 @@ async def static_cover(request: Request, subpath: str = ""):
         is_authed, user_guid, auth_resp = await _probe_upstream_auth(request, upstream_client)
         if not is_authed and auth_resp is not None:
             return auth_resp
-        if not pubpl.selection_allows(CONF, user_guid, pubpl.entry_from_guid(guid)):
+        if not (_search_discovered_allows(guid)
+                or pubpl.selection_allows(CONF, user_guid, pubpl.entry_from_guid(guid))):
             return Response(status_code=404, headers={"Cache-Control": "private, no-store"})
         response = await _playlist_cover_response(
             request, guid, pubpl.cached_tracks(guid) or [], pubpl.cover_url_for(guid))
@@ -11154,7 +11155,8 @@ async def playlist_detail(request: Request):
         is_authed, user_guid, auth_resp = await _probe_upstream_auth(request, get_upstream_client(request.app))
         if not is_authed:
             return auth_resp or JSONResponse(content={"code": -1, "msg": "unauthorized", "data": None}, status_code=401)
-        if not pubpl.selection_allows(CONF, user_guid, public_entry):
+        if not (_search_discovered_allows(guid)
+                or pubpl.selection_allows(CONF, user_guid, public_entry)):
             return JSONResponse(content={"code": -1, "msg": "playlist not found", "data": None})
         try:
             card = await pubpl.load_summary(request.app.state, public_entry)
@@ -11322,7 +11324,8 @@ async def playlist_track_list(request: Request):
         is_authed, user_guid, auth_resp = await _probe_upstream_auth(request, upstream_client)
         if not is_authed and auth_resp is not None:
             return auth_resp
-        if not pubpl.selection_allows(CONF, user_guid, public_entry):
+        if not (_search_discovered_allows(guid)
+                or pubpl.selection_allows(CONF, user_guid, public_entry)):
             return JSONResponse(content={"code": -1, "msg": "playlist not found", "data": None})
         try:
             tracks = dailyrec.stamp_playlist_tracks(
@@ -11997,6 +12000,35 @@ _PUBLIC_SEARCH_BUDGET_S = 2.5
 _PUBLIC_SEARCH_CACHE_TTL_S = 600.0
 _public_search_cache: dict[str, tuple[float, list[dict]]] = {}
 
+# 搜索发现的未添加公开歌单：guid → 放行到期时刻（monotonic）。详情/曲目/封面
+# 端点的按用户 selection 门槛对它们豁免——搜索本身就是"试听后决定是否收藏"的
+# 入口，卡片 guid 原文下发（见 _disguise_except_guids）但被门槛 404 会导致详情
+# 空白。仅内存、TTL 过期自动失效、容量上限惰性清理，重启即清空。
+_SEARCH_DISCOVERED_TTL_S = 2 * 3600.0
+_SEARCH_DISCOVERED_MAX = 512
+_search_discovered: dict[str, float] = {}
+
+
+def _search_discovered_register(guid: str) -> None:
+    now = time.monotonic()
+    if len(_search_discovered) >= _SEARCH_DISCOVERED_MAX:
+        expired = [g for g, at in _search_discovered.items() if at <= now]
+        for g in expired:
+            _search_discovered.pop(g, None)
+        while len(_search_discovered) >= _SEARCH_DISCOVERED_MAX:
+            _search_discovered.pop(next(iter(_search_discovered)))
+    _search_discovered[guid] = now + _SEARCH_DISCOVERED_TTL_S
+
+
+def _search_discovered_allows(guid: str) -> bool:
+    at = _search_discovered.get(str(guid or ""))
+    if at is None:
+        return False
+    if at <= time.monotonic():
+        _search_discovered.pop(guid, None)
+        return False
+    return True
+
 
 async def _search_public_playlists_online(request: Request, keyword: str) -> list[dict]:
     """向启用的洛雪源在线搜公共歌单（未添加进 selection 的也能发现）。
@@ -12077,6 +12109,7 @@ async def _search_public_playlists_online(request: Request, keyword: str) -> lis
         # coverId 必须走 fake_official_guid（带反解表注册副作用）：搜索页封面请求
         # 带 track_<fake>，封面端点靠反解回原文 guid 才能进公开歌单封面分支；
         # pubpl.fake_guid 值相同但无注册，搜索页封面会 400（详情页拉过摘要才有图）
+        _search_discovered_register(guid)
         cards.append({
             "guid": guid,
             "name": name,

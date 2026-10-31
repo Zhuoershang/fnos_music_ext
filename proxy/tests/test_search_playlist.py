@@ -31,6 +31,7 @@ def client(monkeypatch, tmp_path):
 
     monkeypatch.setattr(p, "fetch_upstream_envelope", fake_envelope)
     monkeypatch.setattr(p, "_probe_upstream_auth", fake_probe)
+    p._search_discovered.clear()
     app = p.app
     return TestClient(app)
 
@@ -326,3 +327,68 @@ async def test_online_card_coverid_resolvable_for_cover_endpoint(online_env, mon
         assert p.pubpl.cover_url_for(guid) == "http://img.example/s.jpg"
     finally:
         p.pubpl._cover_urls.pop(guid, None)
+
+
+# -------------------------------- 搜索发现歌单豁免 selection 门槛（2.11.12-2） ----
+
+def test_search_discovered_register_and_allows():
+    """登记后放行、TTL 过期拒绝、容量上限惰性清理。"""
+    p._search_discovered.clear()
+    guid = "online:playlist:public:lx:kw:playlist:100"
+    assert p._search_discovered_allows(guid) is False
+    p._search_discovered_register(guid)
+    assert p._search_discovered_allows(guid) is True
+    # 过期
+    p._search_discovered[guid] = 0.0
+    assert p._search_discovered_allows(guid) is False
+    assert guid not in p._search_discovered
+    # 容量上限：塞满后注册新 guid 不超上限且新 guid 可用
+    for i in range(p._SEARCH_DISCOVERED_MAX + 8):
+        p._search_discovered_register(f"online:playlist:public:lx:kw:playlist:{i}")
+    assert len(p._search_discovered) <= p._SEARCH_DISCOVERED_MAX
+    assert p._search_discovered_allows("online:playlist:public:lx:kw:playlist:0") is False
+    assert p._search_discovered_allows("online:playlist:public:lx:kw:playlist:"
+                                       + str(p._SEARCH_DISCOVERED_MAX + 7)) is True
+    p._search_discovered.clear()
+
+
+@pytest.mark.anyio
+async def test_search_discovered_detail_and_tracks_allowed(client, monkeypatch):
+    """搜索发现的未添加歌单：detail/tracks 豁免门槛可点开；未发现 guid 仍被拦。"""
+    monkeypatch.setitem(p.CONF, "public_search_enabled", True)
+    monkeypatch.setitem(p.CONF, "lx_enabled", True)
+    monkeypatch.setitem(p.CONF, "public_playlists_enabled", True)
+    monkeypatch.setitem(p.CONF, "public_playlists_by_user", "")
+    # 空用户 selection：门槛本身应拒绝一切（未发现 guid 拦截路径成立的前提）
+    monkeypatch.setattr(p.pubpl, "configured_selection", lambda conf, user_guid=None: [])
+    guid = "online:playlist:public:lx:kw:playlist:2867496601"
+    import urllib.parse
+    q = urllib.parse.quote(guid, safe="")
+
+    async def fake_online(request, keyword):
+        p._search_discovered_register(guid)
+        return [{"guid": guid, "name": "🔍 [酷我] 测试歌单", "track_count": 5,
+                 "source": "kw", "cover_url": ""}]
+
+    monkeypatch.setattr(p, "_search_public_playlists_online", fake_online)
+    # 卡片摘要：来自搜索缓存命中后的 pubpl.cached_card？detail 走 load_summary——mock 掉
+    async def fake_summary(state, entry):
+        return {"guid": guid, "name": "🔍 [酷我] 测试歌单", "trackCount": 5}
+    monkeypatch.setattr(p.pubpl, "load_summary", fake_summary)
+    async def fake_tracks(state, entry, build):
+        return [{"guid": "t1", "title": "晴天"}]
+    monkeypatch.setattr(p.pubpl, "load_tracks", fake_tracks)
+
+    data = _search(client, "测试")["data"]
+    assert any(c["guid"] == guid for c in data["list"])
+
+    r = client.get(f"/music/api/v1/playlist/detail?guid={q}")
+    assert r.status_code == 200 and r.json()["code"] == 0
+    r = client.get(f"/music/api/v1/track/playlist-detail/list?guid={q}&page=1&size=30")
+    assert r.status_code == 200 and r.json()["code"] == 0
+
+    # 未登记的同类 guid：门槛正常拦截（不扩大放行面）
+    other = urllib.parse.quote("online:playlist:public:lx:kw:playlist:999", safe="")
+    r = client.get(f"/music/api/v1/playlist/detail?guid={other}")
+    body = r.json()
+    assert body["code"] == -1 and body["msg"] == "playlist not found", body
