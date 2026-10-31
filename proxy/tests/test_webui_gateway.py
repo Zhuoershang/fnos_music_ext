@@ -451,3 +451,22 @@ def test_maintenance_real_unix_delegation(tmp_path, monkeypatch, prefix):
         finally:
             await maintenance.stop(server)
     asyncio.run(run())
+
+
+# ---------------------- maintenance absolute-form / 大小写前缀（2.11.12-3） ----
+
+def test_maintenance_target_absolute_form(tmp_path):
+    """absolute-form 请求行（统一网关重试/转发变体）也能命中维护路由，
+    不再穿透 WebUI 占位产生误导 501；前缀大小写不敏感。"""
+    assert _MOD._maintenance_target(
+        b"POST http://nas:5666/app/fnmusic-ext/api/maintenance/scan-admin-test HTTP/1.1"
+    ) == ("POST", "/api/maintenance/scan-admin-test")
+    assert _MOD._maintenance_target(
+        b"POST https://nas:5667/app/fnmusic-ext/api/maintenance/scan-admin-test HTTP/1.1"
+    ) == ("POST", "/api/maintenance/scan-admin-test")
+    assert _MOD._maintenance_target(
+        b"POST /app/FNMUSIC-EXT/api/maintenance/scan-admin-test HTTP/1.1"
+    ) == ("POST", "/api/maintenance/scan-admin-test")
+    # 非 maintenance 的 absolute-form 依旧放行转发（不误吞）
+    assert _MOD._maintenance_target(
+        b"GET http://nas:5666/app/fnmusic-ext/api/config HTTP/1.1") is None

@@ -2789,14 +2789,27 @@ def test_scan_timing_ui_bindings():
 
 # ------------------------------------ 按用户落盘/扫库（2.11.12 webui） ----
 
-def test_scan_by_user_save_validates_and_writes(env_file):
-    """保存即整体覆盖，值经校验归一化；显式空串=禁用该用户扫库。"""
+def test_scan_by_user_save_merges_incremental(env_file):
+    """增量提交：只更新本次提交的 guid，未提交用户保留（多用户并存）；
+    显式空串=禁用该用户扫库（覆盖旧值）；历史空键在下次保存时被清理。"""
     webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps(
         {"u1": "/u1/scan|{\"guid\":\"g1\"}", "u2": "/u2/scan"})})
+    # 只提交 u1 的修改：u2 必须保留
+    webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps(
+        {"u1": "/u1/scan-v2|{\"guid\":\"g1\"}"})})
     stored = json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"])
-    assert stored == {"u1": "/u1/scan|{\"guid\":\"g1\"}", "u2": "/u2/scan"}
+    assert stored == {"u1": "/u1/scan-v2|{\"guid\":\"g1\"}", "u2": "/u2/scan"}
+    # 显式禁用 u2
+    webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps({"u2": ""})})
+    stored = json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"])
+    assert stored["u2"] == "" and "u1" in stored
+    # u1 置空提交（用户清空输入）→ 显式禁用；后续无关保存不再影响任何用户
     webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps({"u1": ""})})
-    assert json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"]) == {"u1": ""}
+    stored = json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"])
+    assert stored["u1"] == "" and stored["u2"] == ""
+    webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps({"u3": "/u3/scan"})})
+    stored = json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"])
+    assert stored == {"u1": "", "u2": "", "u3": "/u3/scan"}
 
 
 @pytest.mark.parametrize("value", ['[]', '{"u1":"nopath"}', '{"u1":"/x|not-json"}', '{"":"/x"}'])

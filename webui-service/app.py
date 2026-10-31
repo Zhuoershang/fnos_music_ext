@@ -230,9 +230,25 @@ def write_env(updates: dict[str, str]) -> list[str]:
             updates["FNMUSIC_PUBLIC_PLAYLISTS_BY_USER"] = json.dumps(
                 mapping, ensure_ascii=False, separators=(",", ":"))
         if "FNMUSIC_LIBRARY_SCAN_BY_USER" in updates:
+            # 前端只提交本次改动过的 guid（scanByUserChanges 增量）——与
+            # PUBLIC_PLAYLISTS_BY_USER 同款 merge，避免未改动用户被覆盖清空。
+            # merge 后丢弃值为空的旧键（空串=禁用语义仅在显式提交时保留；
+            # 未提交的空键属于历史残留，清掉保持 .env 干净）。
+            try:
+                existing_scan = json.loads(
+                    str(read_env().get("FNMUSIC_LIBRARY_SCAN_BY_USER") or "{}"))
+            except ValueError:
+                existing_scan = {}
+            if not isinstance(existing_scan, dict):
+                existing_scan = {}
+            submitted = _validate_scan_by_user(updates["FNMUSIC_LIBRARY_SCAN_BY_USER"])
+            # 增量 merge：本次提交的键（含显式空串=禁用该用户）覆盖旧值，
+            # 未提交的用户条目原样保留——空串键是有效语义（显式禁用），
+            # 不清理，否则禁用状态会随后续无关保存丢失。
+            merged = dict(existing_scan)
+            merged.update(submitted)
             updates["FNMUSIC_LIBRARY_SCAN_BY_USER"] = json.dumps(
-                _validate_scan_by_user(updates["FNMUSIC_LIBRARY_SCAN_BY_USER"]),
-                ensure_ascii=False, separators=(",", ":"))
+                merged, ensure_ascii=False, separators=(",", ":"))
         return _write_env_unlocked(updates)
 
 
@@ -1917,17 +1933,89 @@ async def api_maintenance_cleanup(job_id: str = ""):
     raise HTTPException(status_code=501, detail="直连模式不支持清理垃圾文件，请在飞牛桌面内打开管理台")
 
 
+MAINTENANCE_SOCKET_PATH = "/run/fnmusic-ext/maintenance.sock"
+_MAINTENANCE_PROXY_ROUTES = {
+    ("GET", "/api/maintenance/music-users"): (None, None),
+    ("POST", "/api/maintenance/scan-admin-test"): ({}, b"{}"),
+    ("POST", "/api/maintenance/scan-manual"): (None, None),
+}
+
+
+async def _forward_maintenance(method: str, path: str, body: bytes) -> "dict | None":
+    """把维护请求转发到宿主 proxy 的 maintenance.sock（与桌面网关同一通道）。
+
+    WebUI 与 proxy 同机（native/docker 部署都在宿主网络命名空间内可见该
+    socket）；socket 不存在（服务未装/直连隔离）返回 None 由调用方 501。
+    请求形态对齐 webui_gateway.handle_maintenance 的转发（origin-form +
+    Content-Length + Connection: close）。
+    """
+    if not os.path.exists(MAINTENANCE_SOCKET_PATH):
+        return None
+    try:
+        reader, writer = await asyncio.open_unix_connection(MAINTENANCE_SOCKET_PATH)
+    except (OSError, ValueError):
+        return None
+    try:
+        head = (f"{method} {path} HTTP/1.1\r\nHost: localhost\r\n"
+                f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n")
+        writer.write(head.encode("ascii") + body)
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(1 << 20), timeout=35.0)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _maintenance_with_fallback(method: str, path: str, body: bytes,
+                                     detail: str) -> "Response":
+    """直连场景兜底：转发本机 maintenance.sock 执行；socket 不可用才 501。
+
+    管理员校验已由 AuthMiddleware（x-trim-isadmin）完成。桌面网关链路通常
+    在宿主 webui_gateway 层拦截，到不了这里；到达即视为允许转发。
+    """
+    result = await _forward_maintenance(method, path, body)
+    if result is None:
+        raise HTTPException(status_code=501, detail=detail)
+    return JSONResponse(content=result)
+
+
 @app.get("/api/maintenance/music-users")
 async def api_maintenance_music_users():
-    """Music users are read by the host proxy through the desktop gateway."""
-    raise HTTPException(status_code=501, detail="直连模式不支持读取飞牛音乐用户，请在飞牛桌面内打开管理台")
+    """Music users：桌面网关链路已由宿主网关拦截；直连场景转发本机 socket。"""
+    result = await _forward_maintenance("GET", "/api/maintenance/music-users", b"")
+    if result is None:
+        raise HTTPException(status_code=501, detail="直连模式不支持读取飞牛音乐用户，请在飞牛桌面内打开管理台")
+    return JSONResponse(content=result)
 
 
 @app.post("/api/maintenance/scan-admin-test")
+async def api_maintenance_scan_admin_test():
+    return await _maintenance_with_fallback(
+        "POST", "/api/maintenance/scan-admin-test", b"{}",
+        "直连模式不支持扫库管理操作，请在飞牛桌面内打开管理台")
+
+
 @app.post("/api/maintenance/scan-manual")
-async def api_maintenance_scan_actions():
-    """Scan login-test / manual-scan run on the host proxy via the desktop gateway."""
-    raise HTTPException(status_code=501, detail="直连模式不支持扫库管理操作，请在飞牛桌面内打开管理台")
+async def api_maintenance_scan_manual(request: Request):
+    try:
+        body_obj = await request.json()
+    except Exception:
+        body_obj = {}
+    guid = str((body_obj or {}).get("guid") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", guid):
+        raise HTTPException(status_code=400, detail="共享库 guid 无效")
+    body = json.dumps({"guid": guid.lower()}, separators=(",", ":")).encode("utf-8")
+    return await _maintenance_with_fallback(
+        "POST", "/api/maintenance/scan-manual", body,
+        "直连模式不支持扫库管理操作，请在飞牛桌面内打开管理台")
 
 
 @app.get("/api/maintenance/organize")

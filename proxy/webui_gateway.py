@@ -306,7 +306,13 @@ def _maintenance_target(head_raw: bytes):
         return None
     target = parts[1]
     prefix = "/app/fnmusic-ext"
-    if target.startswith(prefix + "/"):
+    # absolute-form 请求行（HTTP/1.1 允许；统一网关重试/转发变体会用）：
+    # 剥掉 scheme://host 后再匹配，否则穿透到 WebUI 占位路由得到误导 501。
+    scheme_pos = target.find("://")
+    if scheme_pos > 0 and target[:scheme_pos] in ("http", "https"):
+        path_pos = target.find("/", scheme_pos + 3)
+        target = target[path_pos:] if path_pos >= 0 else "/"
+    if target.lower().startswith(prefix.lower() + "/"):
         target = target[len(prefix):]
     # Reserve the entire namespace, including malformed/unknown maintenance paths.
     # 规范化：折叠重复斜杠（统一网关/客户端可能产生 //api/...，否则穿透到
