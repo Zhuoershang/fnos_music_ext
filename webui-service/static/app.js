@@ -38,6 +38,8 @@ let publicSelectionMap = {};
 const publicUserChanges = new Set();
 let scanByUserMap = {};
 const scanByUserChanges = new Set();
+// 标记「移除」的失效用户 guid：save 时提交 null 值，后端 drop 该条目
+const scanByUserRemoves = new Set();
 let publicCapabilities = null;
 let publicState = {
   provider: "musicbox", channel: "charts", source: "netease", category: "", sort: "",
@@ -622,6 +624,7 @@ function applyConfigToForm() {
     scanByUserMap = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   }
   scanByUserChanges.clear();
+  scanByUserRemoves.clear();
   $("#tee-save-by-user").checked = v.FNMUSIC_TEE_SAVE_BY_USER === "true";
   $("#scan-delay").value = v.FNMUSIC_SCAN_DELAY_S ?? "3";
   $("#scan-cooldown").value = v.FNMUSIC_SCAN_COOLDOWN_S ?? "90";
@@ -746,9 +749,14 @@ function collectConfig() {
       publicSelection.map(({ provider, source, kind, id }) => ({ provider, source, kind, id }))
     );
   }
-  if (configSchema.FNMUSIC_LIBRARY_SCAN_BY_USER && scanByUserChanges.size) {
+  if (configSchema.FNMUSIC_LIBRARY_SCAN_BY_USER && (scanByUserChanges.size || scanByUserRemoves.size)) {
+    // 增量提交：本次改动过的 guid；移除的 guid 用 null 值，后端 drop 该条目
     const scanChanges = {};
+    for (const guid of scanByUserRemoves) {
+      scanChanges[guid] = null;
+    }
     for (const guid of scanByUserChanges) {
+      if (scanByUserRemoves.has(guid)) continue;
       scanChanges[guid] = String(scanByUserMap[guid] ?? "").trim();
     }
     values.FNMUSIC_LIBRARY_SCAN_BY_USER = JSON.stringify(scanChanges);
@@ -1039,6 +1047,10 @@ function scanByUserLabel(guid) {
   return user ? `${user.name || guid}${user.role === "admin" ? "（管理员）" : ""}` : guid;
 }
 
+function isStaleScanUser(guid) {
+  return publicUsersReady && !publicUsers.some((u) => u.guid === guid);
+}
+
 function renderScanByUser() {
   const panel = $("#scan-by-user-panel");
   if (!panel) return;
@@ -1050,9 +1062,18 @@ function renderScanByUser() {
   list.innerHTML = guids.size
     ? [...guids].sort().map((guid) => {
         const value = scanByUserMap[guid] ?? "";
-        return `<div class="field"><div class="btn-row"><span class="grow">${escapeHtml(scanByUserLabel(guid))}</span>
+        const stale = isStaleScanUser(guid);
+        const label = scanByUserLabel(guid);
+        const staleMark = stale
+          ? ' <em class="stale-mark">（该用户已不在飞牛音乐，配置失效）</em>'
+          : "";
+        const removeBtn = stale
+          ? `<button class="btn scan-by-user-remove" type="button" data-guid="${escapeHtml(guid)}"
+                     title="移除该失效用户的扫库配置">移除</button>`
+          : "";
+        return `<div class="field${stale ? " scan-by-user-stale" : ""}"><div class="btn-row"><span class="grow">${escapeHtml(label)}${staleMark}</span>
           <button class="btn scan-by-user-run" type="button" data-guid="${escapeHtml(guid)}"
-                  title="用当前填写的扫库接口手动触发一次扫描">手动扫库</button></div>
+                  title="用当前填写的扫库接口手动触发一次扫描">手动扫库</button>${removeBtn}</div>
           <input class="input scan-by-user-input" data-guid="${escapeHtml(guid)}"
                  value="${escapeHtml(value)}"
                  placeholder="留空=用全局曲库重扫接口；全局也为空=该用户不触发扫库">
@@ -1067,12 +1088,28 @@ function renderScanByUser() {
       if ((scanByUserMap[guid] ?? "") === text) return;
       scanByUserMap[guid] = text;
       scanByUserChanges.add(guid);
+      // 用户重新输入有效值即撤销之前的「移除」标记
+      scanByUserRemoves.delete(guid);
       markDirty("按用户扫库配置已修改");
     });
   });
   list.querySelectorAll(".scan-by-user-run").forEach((btn) => {
     btn.addEventListener("click", () => runManualScan(btn.dataset.guid, btn));
   });
+  list.querySelectorAll(".scan-by-user-remove").forEach((btn) => {
+    btn.addEventListener("click", () => removeScanByUser(btn.dataset.guid));
+  });
+}
+
+function removeScanByUser(guid) {
+  if (!(guid in scanByUserMap) && !scanByUserRemoves.has(guid)) return;
+  // 软删除：置空并标记移除，保存时提交 null 让后端 drop；未保存前仍在 UI 隐藏
+  delete scanByUserMap[guid];
+  scanByUserChanges.add(guid);
+  scanByUserRemoves.add(guid);
+  markDirty("已移除失效用户的扫库配置，保存后生效");
+  toast("已移除该失效用户的扫库配置，保存后生效", "ok");
+  renderScanByUser();
 }
 
 async function scanGuidOfInput(guid) {

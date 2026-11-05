@@ -232,8 +232,18 @@ def write_env(updates: dict[str, str]) -> list[str]:
         if "FNMUSIC_LIBRARY_SCAN_BY_USER" in updates:
             # 前端只提交本次改动过的 guid（scanByUserChanges 增量）——与
             # PUBLIC_PLAYLISTS_BY_USER 同款 merge，避免未改动用户被覆盖清空。
-            # merge 后丢弃值为空的旧键（空串=禁用语义仅在显式提交时保留；
-            # 未提交的空键属于历史残留，清掉保持 .env 干净）。
+            # 删除：前端移除失效用户时提交该 guid 的 null 值，这里 drop 该键。
+            raw_updates = updates["FNMUSIC_LIBRARY_SCAN_BY_USER"]
+            try:
+                submitted = json.loads(str(raw_updates or "{}"))
+            except ValueError:
+                submitted = {}
+            if not isinstance(submitted, dict):
+                submitted = {}
+            delete_keys = {k for k, v in submitted.items() if v is None}
+            # 校验只处理非 null（null=删除）的键；空串=禁用语义保留
+            validated = _validate_scan_by_user(
+                {k: v for k, v in submitted.items() if v is not None})
             try:
                 existing_scan = json.loads(
                     str(read_env().get("FNMUSIC_LIBRARY_SCAN_BY_USER") or "{}"))
@@ -241,12 +251,12 @@ def write_env(updates: dict[str, str]) -> list[str]:
                 existing_scan = {}
             if not isinstance(existing_scan, dict):
                 existing_scan = {}
-            submitted = _validate_scan_by_user(updates["FNMUSIC_LIBRARY_SCAN_BY_USER"])
-            # 增量 merge：本次提交的键（含显式空串=禁用该用户）覆盖旧值，
-            # 未提交的用户条目原样保留——空串键是有效语义（显式禁用），
-            # 不清理，否则禁用状态会随后续无关保存丢失。
+            # 增量 merge：本次提交的键（含显式空串=禁用）覆盖旧值，
+            # 未提交的用户条目原样保留；null=删除的键被 drop，不覆盖旧值。
             merged = dict(existing_scan)
-            merged.update(submitted)
+            merged.update(validated)
+            for key in delete_keys:
+                merged.pop(key, None)
             updates["FNMUSIC_LIBRARY_SCAN_BY_USER"] = json.dumps(
                 merged, ensure_ascii=False, separators=(",", ":"))
         return _write_env_unlocked(updates)

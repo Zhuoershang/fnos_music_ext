@@ -2791,7 +2791,8 @@ def test_scan_timing_ui_bindings():
 
 def test_scan_by_user_save_merges_incremental(env_file):
     """增量提交：只更新本次提交的 guid，未提交用户保留（多用户并存）；
-    显式空串=禁用该用户扫库（覆盖旧值）；历史空键在下次保存时被清理。"""
+    显式空串=禁用该用户扫库（覆盖旧值）；显式 null=移除该用户条目。
+    未提交用户的条目原样保留，显式禁用/移除状态都持久保留。"""
     webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps(
         {"u1": "/u1/scan|{\"guid\":\"g1\"}", "u2": "/u2/scan"})})
     # 只提交 u1 的修改：u2 必须保留
@@ -2810,6 +2811,15 @@ def test_scan_by_user_save_merges_incremental(env_file):
     webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps({"u3": "/u3/scan"})})
     stored = json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"])
     assert stored == {"u1": "", "u2": "", "u3": "/u3/scan"}
+    # 移除失效用户（guid 不在当前用户列表中）：null 值 drop 该条目，
+    # 已存在的其它条目不受影响
+    webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps(
+        {"stale1": "/old|{}", "stale2": "", "live": "/live/scan|{\"guid\":\"g2\"}"})})
+    webui.write_env({"FNMUSIC_LIBRARY_SCAN_BY_USER": json.dumps(
+        {"stale1": None, "live": "/live/scan|{\"guid\":\"g2\"}"})})
+    stored = json.loads(webui.read_env()["FNMUSIC_LIBRARY_SCAN_BY_USER"])
+    assert "stale1" not in stored
+    assert stored["live"] == "/live/scan|{\"guid\":\"g2\"}"
 
 
 @pytest.mark.parametrize("value", ['[]', '{"u1":"nopath"}', '{"u1":"/x|not-json"}', '{"":"/x"}'])

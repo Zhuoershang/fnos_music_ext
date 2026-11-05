@@ -2609,6 +2609,26 @@ test("关于页打赏二维码：图片加载失败触发 onerror 时自动隐�
   assert.strictEqual(donateCard.hidden, true);
 });
 
+test("按用户扫库：移除失效用户 → collectConfig 提交该 guid 的 null 值", async () => {
+  reset();
+  enqueue("/app/fnmusic-ext/api/config", {
+    values: {
+      FNMUSIC_LIBRARY_SCAN_BY_USER: JSON.stringify({
+        u1: '/u1/scan|{"guid":"g1"}',
+        stale: "/stale/scan",
+      }),
+    },
+    schema: { FNMUSIC_LIBRARY_SCAN_BY_USER: { kind: "str", group: "tee", reload: "hot", label: "各用户曲库重扫接口" } },
+  });
+  await global.loadConfig();
+  global.removeScanByUser("stale");
+  const values = global.collectConfig();
+  const parsed = JSON.parse(values.FNMUSIC_LIBRARY_SCAN_BY_USER);
+  // 移除的 guid 以 null 提交（后端 drop）；未改动的 u1 走增量不提交
+  assert.strictEqual(parsed.stale, null);
+  assert.ok(!("u1" in parsed), "未改动用户不应出现在增量提交里");
+});
+
 /* ------------------------------------------------ 运行 --------------------- */
 (async () => {
   let failed = 0;

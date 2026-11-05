@@ -184,6 +184,11 @@ h2 { display: flex; align-items: center; justify-content: space-between; gap: 10
 .btn:disabled { opacity: .5; cursor: default; }
 .btn-row { display: flex; gap: 10px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
 
+.scan-by-user-stale { opacity: .85; }
+.scan-by-user-stale .input { background: var(--bg, #f6f6f6); }
+.stale-mark { color: var(--warn, #b8860b); font-style: normal; font-size: 12px; }
+.scan-by-user-remove { color: var(--err, #c0392b); }
+
 .radio-list { display: flex; flex-direction: column; gap: 8px; }
 .direct-list { display: grid; gap: 8px; }
 .direct-option {
